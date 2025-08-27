@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Traffic Light Rec</string>
+    <string name="camera_permission_required">Camera permission is required</string>
+    <string name="red_light">紅燈</string>
+    <string name="yellow_light">黃燈</string>
+    <string name="green_light">綠燈</string>
+    <string name="light_off">燈號關閉</string>
+</resources>
