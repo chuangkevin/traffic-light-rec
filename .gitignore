@@ -85,5 +85,11 @@ lint/tmp/
 # Android Profiling
 *.hprof
 
-# ONNX Models (large files)
-*.onnx
+# ONNX Models (exclude large model files but keep our test models)
+# *.onnx
+
+# PyTorch models
+*.pt
+
+# Claude Code generated files
+.claude/
