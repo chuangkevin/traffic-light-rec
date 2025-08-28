@@ -20,7 +20,8 @@ class FrameAnalyzer(
     private val inferenceEngine: InferenceEngine,
     private val stateMachine: StateMachine,
     private val roiSelector: RoiSelector,
-    private val onResultCallback: (AnalysisResult) -> Unit
+    private val onResultCallback: (AnalysisResult) -> Unit,
+    private val onDebugCallback: (String) -> Unit = {}
 ) : ImageAnalysis.Analyzer {
 
     private var frameCounter = 0
@@ -51,12 +52,15 @@ class FrameAnalyzer(
         analysisScope.launch {
             try {
                 val bitmap = convertImageProxyToBitmap(image)
+                onDebugCallback("Frame #$frameCounter (${bitmap.width}x${bitmap.height})")
                 
                 if (shouldRunDetection) {
+                    onDebugCallback("🔍 執行物件檢測...")
                     runDetection(bitmap, currentTime)
                 }
                 
                 if (shouldRunClassification) {
+                    onDebugCallback("🎯 執行狀態分類...")
                     runClassification(bitmap, currentTime)
                 }
                 
@@ -66,6 +70,7 @@ class FrameAnalyzer(
                 }
                 
             } catch (e: Exception) {
+                onDebugCallback("❌ 分析錯誤: ${e.message}")
                 e.printStackTrace()
             } finally {
                 image.close()
@@ -75,7 +80,14 @@ class FrameAnalyzer(
     
     private suspend fun runDetection(bitmap: Bitmap, currentTime: Long) {
         val detections = inferenceEngine.detectTrafficLights(bitmap)
+        onDebugCallback("檢測到 ${detections.size} 個候選交通燈")
+        
         val selectedRoi = roiSelector.selectBestRoi(detections, bitmap.width, bitmap.height)
+        if (selectedRoi != null) {
+            onDebugCallback("✅ 選中 ROI: ${selectedRoi.width().toInt()}x${selectedRoi.height().toInt()}")
+        } else {
+            onDebugCallback("⚠️ 未找到合適的 ROI")
+        }
         
         lastDetectionTime = currentTime
     }
@@ -84,11 +96,16 @@ class FrameAnalyzer(
         val currentRoi = roiSelector.getCurrentRoi()
         
         if (currentRoi != null && roiSelector.isRoiStable()) {
+            onDebugCallback("🎯 分類 ROI: ${currentRoi.width().toInt()}x${currentRoi.height().toInt()}")
             val expandedRoi = roiSelector.expandRoi(currentRoi, 1.1f)
             val clampedRoi = roiSelector.cropRoiToImageBounds(expandedRoi, bitmap.width, bitmap.height)
             
             val classificationResult = inferenceEngine.classifyTrafficLight(bitmap, clampedRoi)
             stateMachine.processClassification(classificationResult)
+            
+            val stateNames = arrayOf("紅燈", "黃燈", "綠燈", "關閉", "未知")
+            val stateName = stateNames.getOrNull(classificationResult.classId) ?: "未知"
+            onDebugCallback("分類結果: $stateName (信心度: ${(classificationResult.confidence * 100).toInt()}%)")
         }
         
         lastClassificationTime = currentTime

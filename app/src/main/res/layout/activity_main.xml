@@ -19,25 +19,44 @@
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
         android:background="#80000000"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:padding="16dp">
 
         <TextView
-            android:id="@+id/statusText"
-            android:layout_width="0dp"
+            android:id="@+id/debugText"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="等待檢測..."
-            android:textColor="#FFFFFF"
-            android:textSize="16sp" />
+            android:text="正在初始化..."
+            android:textColor="#FFFF00"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:maxLines="4"
+            android:scrollHorizontally="true" />
 
-        <TextView
-            android:id="@+id/fpsText"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="FPS: 0"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp" />
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp">
+
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="等待檢測..."
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/fpsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="FPS: 0"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp" />
+
+        </LinearLayout>
 
     </LinearLayout>
 

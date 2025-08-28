@@ -19,6 +19,7 @@ class OverlayView @JvmOverloads constructor(
     private var currentState: TrafficLightState = TrafficLightState.UNKNOWN
     private var confidence: Float = 0f
     private var currentRoi: RectF? = null
+    private var debugInfo: String = ""
     
     private val statePaint = Paint().apply {
         style = Paint.Style.FILL
@@ -49,6 +50,11 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
     
+    fun updateDebugInfo(debugInfo: String) {
+        this.debugInfo = debugInfo
+        invalidate()
+    }
+    
     fun updateRoi(roi: RectF?) {
         this.currentRoi = roi
         invalidate()
@@ -59,6 +65,7 @@ class OverlayView @JvmOverloads constructor(
         
         drawStateIndicator(canvas)
         drawRoi(canvas)
+        drawDebugInfo(canvas)
     }
     
     private fun drawStateIndicator(canvas: Canvas) {
@@ -164,5 +171,20 @@ class OverlayView @JvmOverloads constructor(
             scaleY = scale
         }
         pulseAnimator.start()
+    }
+    
+    private fun drawDebugInfo(canvas: Canvas) {
+        if (debugInfo.isNotEmpty()) {
+            val debugPaint = Paint(textPaint).apply {
+                textSize = 24f
+                color = ContextCompat.getColor(context, android.R.color.holo_orange_light)
+            }
+            
+            // 在螢幕右上角顯示 debug 信息
+            val debugX = width - 20f
+            val debugY = 60f
+            
+            canvas.drawText(debugInfo, debugX, debugY, debugPaint)
+        }
     }
 }

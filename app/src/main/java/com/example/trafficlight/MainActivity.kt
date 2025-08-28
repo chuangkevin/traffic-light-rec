@@ -24,6 +24,7 @@ import com.example.trafficlight.util.hasCameraPermission
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -34,6 +35,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var overlayView: OverlayView
     private lateinit var statusText: TextView
     private lateinit var fpsText: TextView
+    private lateinit var debugText: TextView
     
     private lateinit var inferenceEngine: InferenceEngine
     private lateinit var stateMachine: StateMachine
@@ -77,6 +79,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         overlayView = findViewById(R.id.overlayView)
         statusText = findViewById(R.id.statusText)
         fpsText = findViewById(R.id.fpsText)
+        debugText = findViewById(R.id.debugText)
+    }
+    
+    private fun updateDebugText(message: String) {
+        runOnUiThread {
+            val timestamp = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+            debugText.text = "[$timestamp] $message"
+            Log.d("MainActivity", message)
+        }
     }
 
     private fun initComponents() {
@@ -88,7 +99,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             inferenceEngine = inferenceEngine,
             stateMachine = stateMachine,
             roiSelector = roiSelector,
-            onResultCallback = ::onAnalysisResult
+            onResultCallback = ::onAnalysisResult,
+            onDebugCallback = ::updateDebugText
         )
         
         textToSpeech = TextToSpeech(this, this)
@@ -139,17 +151,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun startCamera() {
+        updateDebugText("開始啟動相機和 AI 模型...")
         lifecycleScope.launch {
+            updateDebugText("正在初始化 AI 模型...")
             val initSuccess = inferenceEngine.initialize()
             if (!initSuccess) {
+                updateDebugText("❌ AI 模型載入失敗!")
                 Toast.makeText(this@MainActivity, "AI模型載入失敗", Toast.LENGTH_LONG).show()
                 return@launch
             }
+            updateDebugText("✅ AI 模型載入成功")
             
+            updateDebugText("正在啟動相機...")
             val cameraProviderFuture = ProcessCameraProvider.getInstance(this@MainActivity)
             cameraProvider = cameraProviderFuture.get()
             
             bindCameraUseCases()
+            updateDebugText("✅ 相機啟動完成，開始檢測...")
         }
     }
 
