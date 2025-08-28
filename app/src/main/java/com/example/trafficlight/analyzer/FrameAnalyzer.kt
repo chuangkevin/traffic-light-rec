@@ -28,6 +28,7 @@ class FrameAnalyzer(
     private var lastDetectionTime = 0L
     private var lastClassificationTime = 0L
     private var fpsCounter = FpsCounter()
+    private var allDetections = emptyList<com.example.trafficlight.inference.DetectionResult>()
     
     private val detectionInterval = 3
     private val classificationInterval = 1
@@ -38,7 +39,8 @@ class FrameAnalyzer(
         val confidence: Float,
         val fps: Int,
         val roiInfo: String,
-        val debugInfo: String
+        val debugInfo: String,
+        val allDetections: List<com.example.trafficlight.inference.DetectionResult> = emptyList()
     )
 
     override fun analyze(image: ImageProxy) {
@@ -79,10 +81,14 @@ class FrameAnalyzer(
     }
     
     private suspend fun runDetection(bitmap: Bitmap, currentTime: Long) {
-        val detections = inferenceEngine.detectTrafficLights(bitmap)
-        onDebugCallback("檢測到 ${detections.size} 個候選交通燈")
+        allDetections = inferenceEngine.detectTrafficLights(bitmap)
+        onDebugCallback("檢測到 ${allDetections.size} 個物件")
         
-        val selectedRoi = roiSelector.selectBestRoi(detections, bitmap.width, bitmap.height)
+        // 過濾出交通燈進行 ROI 選擇
+        val trafficLightDetections = allDetections.filter { it.classId == 9 } // traffic light class
+        onDebugCallback("其中 ${trafficLightDetections.size} 個是交通燈")
+        
+        val selectedRoi = roiSelector.selectBestRoi(trafficLightDetections, bitmap.width, bitmap.height)
         if (selectedRoi != null) {
             onDebugCallback("✅ 選中 ROI: ${selectedRoi.width().toInt()}x${selectedRoi.height().toInt()}")
         } else {
@@ -163,7 +169,7 @@ class FrameAnalyzer(
         val roiInfo = createRoiInfo()
         val debugInfo = createDebugInfo()
         
-        return AnalysisResult(currentState, confidence, fps, roiInfo, debugInfo)
+        return AnalysisResult(currentState, confidence, fps, roiInfo, debugInfo, allDetections)
     }
     
     private fun createRoiInfo(): String {

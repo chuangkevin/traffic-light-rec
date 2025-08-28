@@ -227,6 +227,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             statusText.text = "${result.currentState} (${(result.confidence * 100).toInt()}%)"
             fpsText.text = "FPS: ${result.fps}"
             
+            // 更新所有檢測結果到 overlay
+            overlayView.updateDetections(result.allDetections)
+            
             Log.d("Analysis", "${result.debugInfo}")
         }
     }

@@ -9,6 +9,7 @@ import android.view.View
 import androidx.core.content.ContextCompat
 import com.example.trafficlight.R
 import com.example.trafficlight.logic.TrafficLightState
+import com.example.trafficlight.inference.DetectionResult
 
 class OverlayView @JvmOverloads constructor(
     context: Context,
@@ -20,6 +21,7 @@ class OverlayView @JvmOverloads constructor(
     private var confidence: Float = 0f
     private var currentRoi: RectF? = null
     private var debugInfo: String = ""
+    private var allDetections: List<DetectionResult> = emptyList()
     
     private val statePaint = Paint().apply {
         style = Paint.Style.FILL
@@ -31,6 +33,27 @@ class OverlayView @JvmOverloads constructor(
         strokeWidth = 4f
         isAntiAlias = true
         color = ContextCompat.getColor(context, android.R.color.white)
+    }
+    
+    private val detectionPaint = Paint().apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        isAntiAlias = true
+        color = ContextCompat.getColor(context, android.R.color.holo_green_light)
+    }
+    
+    private val labelPaint = Paint().apply {
+        textSize = 32f
+        isAntiAlias = true
+        color = ContextCompat.getColor(context, android.R.color.white)
+        style = Paint.Style.FILL
+    }
+    
+    private val labelBackgroundPaint = Paint().apply {
+        style = Paint.Style.FILL
+        isAntiAlias = true
+        color = ContextCompat.getColor(context, android.R.color.black)
+        alpha = 180
     }
     
     private val textPaint = Paint().apply {
@@ -50,6 +73,11 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
     
+    fun updateDetections(detections: List<DetectionResult>) {
+        this.allDetections = detections
+        invalidate()
+    }
+    
     fun updateDebugInfo(debugInfo: String) {
         this.debugInfo = debugInfo
         invalidate()
@@ -63,11 +91,60 @@ class OverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         
+        drawAllDetections(canvas)
         drawStateIndicator(canvas)
         drawRoi(canvas)
         drawDebugInfo(canvas)
     }
     
+    private fun drawAllDetections(canvas: Canvas) {
+        for (detection in allDetections) {
+            // 設定框線顏色 - 交通燈用特殊顏色標示
+            val boxColor = if (detection.classId == 9) { // traffic light
+                ContextCompat.getColor(context, android.R.color.holo_red_light)
+            } else {
+                ContextCompat.getColor(context, android.R.color.holo_green_light)
+            }
+            
+            detectionPaint.color = boxColor
+            detectionPaint.alpha = (255 * 0.8f).toInt()
+            
+            // 畫邊界框
+            canvas.drawRect(detection.bbox, detectionPaint)
+            
+            // 準備標籤文字
+            val label = "${detection.label} ${(detection.confidence * 100).toInt()}%"
+            val textBounds = android.graphics.Rect()
+            labelPaint.getTextBounds(label, 0, label.length, textBounds)
+            
+            // 計算標籤位置
+            val labelX = detection.bbox.left
+            val labelY = detection.bbox.top - 5f
+            val labelWidth = textBounds.width() + 16f
+            val labelHeight = textBounds.height() + 8f
+            
+            // 確保標籤在螢幕範圍內
+            val adjustedY = if (labelY - labelHeight < 0) detection.bbox.top + labelHeight + 5f else labelY
+            
+            // 畫標籤背景
+            val labelRect = RectF(
+                labelX,
+                adjustedY - labelHeight,
+                labelX + labelWidth,
+                adjustedY
+            )
+            canvas.drawRect(labelRect, labelBackgroundPaint)
+            
+            // 畫標籤文字
+            canvas.drawText(
+                label,
+                labelX + 8f,
+                adjustedY - 4f,
+                labelPaint
+            )
+        }
+    }
+
     private fun drawStateIndicator(canvas: Canvas) {
         val indicatorRect = RectF(
             indicatorMargin,

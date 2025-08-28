@@ -14,8 +14,27 @@ import java.nio.FloatBuffer
 data class DetectionResult(
     val bbox: RectF,
     val confidence: Float,
-    val classId: Int
-)
+    val classId: Int,
+    val label: String = getClassLabel(classId)
+) {
+    companion object {
+        fun getClassLabel(classId: Int): String {
+            // COCO dataset class labels (commonly used in YOLO models)
+            val labels = arrayOf(
+                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+                "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+                "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+                "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+                "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+                "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+                "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
+                "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
+                "teddy bear", "hair drier", "toothbrush"
+            )
+            return if (classId in 0 until labels.size) labels[classId] else "unknown_$classId"
+        }
+    }
+}
 
 data class ClassificationResult(
     val classId: Int,
@@ -42,7 +61,7 @@ class InferenceEngine(private val context: Context) {
     companion object {
         private const val DETECTOR_MODEL = "models/detector.onnx"
         private const val CLASSIFIER_MODEL = "models/classifier.onnx"
-        private const val CONFIDENCE_THRESHOLD = 0.1f  // 降低閾值以增加檢測靈敏度
+        private const val CONFIDENCE_THRESHOLD = 0.05f  // 更低的閾值以顯示更多檢測結果
         private const val IOU_THRESHOLD = 0.45f
     }
     
@@ -85,7 +104,7 @@ class InferenceEngine(private val context: Context) {
             val outputTensor = outputs.get(0) as OnnxTensor
             
             val detections = parseDetectorOutput(outputTensor, bitmap.width, bitmap.height)
-            Log.d("InferenceEngine", "檢測到 ${detections.size} 個交通燈")
+            Log.d("InferenceEngine", "檢測到 ${detections.size} 個物件")
             
             inputTensor.close()
             outputTensor.close()
@@ -93,10 +112,17 @@ class InferenceEngine(private val context: Context) {
             
             detections
         } catch (e: Exception) {
-            Log.e("InferenceEngine", "交通燈檢測失敗: ${e.message}", e)
+            Log.e("InferenceEngine", "物件檢測失敗: ${e.message}", e)
             e.printStackTrace()
             emptyList()
         }
+    }
+
+    // 專門用於取得交通燈檢測結果的函數
+    suspend fun detectTrafficLightsOnly(bitmap: Bitmap): List<DetectionResult> = withContext(Dispatchers.Default) {
+        val allDetections = detectTrafficLights(bitmap)
+        // 過濾出交通燈 (classId = 9 in COCO dataset)
+        return@withContext allDetections.filter { it.classId == 9 }
     }
     
     suspend fun classifyTrafficLight(bitmap: Bitmap, roi: RectF): ClassificationResult = withContext(Dispatchers.Default) {
@@ -233,10 +259,11 @@ class InferenceEngine(private val context: Context) {
                         detections.add(DetectionResult(
                             RectF(x1, y1, x2, y2),
                             totalConfidence,
-                            bestClassId
+                            bestClassId,
+                            DetectionResult.getClassLabel(bestClassId)
                         ))
                         
-                        Log.d("InferenceEngine", "檢測到交通燈: 信心度=$totalConfidence, 類別=$bestClassId, bbox=($x1,$y1,$x2,$y2)")
+                        Log.d("InferenceEngine", "檢測到物件: ${DetectionResult.getClassLabel(bestClassId)}, 信心度=$totalConfidence, bbox=($x1,$y1,$x2,$y2)")
                     }
                 }
             }
