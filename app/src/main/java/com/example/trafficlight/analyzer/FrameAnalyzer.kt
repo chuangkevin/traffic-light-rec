@@ -81,10 +81,18 @@ class FrameAnalyzer(
     }
     
     private suspend fun runDetection(bitmap: Bitmap, currentTime: Long) {
+        // 檢測前記錄圖片尺寸
+        onDebugCallback("推理圖片尺寸: ${bitmap.width}x${bitmap.height}")
+        
         allDetections = inferenceEngine.detectTrafficLights(bitmap)
         onDebugCallback("檢測到 ${allDetections.size} 個物件")
         
-        // 過濾出交通燈進行 ROI 選擇
+        // 座標轉換：從推理圖片座標系轉換到預覽座標系
+        // Android 相機通常會旋轉 90 度，需要進行座標轉換
+        val transformedDetections = transformDetectionCoordinates(allDetections, bitmap.width, bitmap.height)
+        allDetections = transformedDetections
+        
+        // 過濾出交通燈進行 ROI 選擇  
         val trafficLightDetections = allDetections.filter { it.classId == 9 } // traffic light class
         onDebugCallback("其中 ${trafficLightDetections.size} 個是交通燈")
         
@@ -96,6 +104,30 @@ class FrameAnalyzer(
         }
         
         lastDetectionTime = currentTime
+    }
+    
+    private fun transformDetectionCoordinates(
+        detections: List<com.example.trafficlight.inference.DetectionResult>,
+        sourceWidth: Int, 
+        sourceHeight: Int
+    ): List<com.example.trafficlight.inference.DetectionResult> {
+        // 直接返回原始座標，不進行轉換
+        // 因為相機預覽和推理圖像應該使用同一個座標系
+        onDebugCallback("保持原始座標: ${sourceWidth}x${sourceHeight}")
+        
+        return detections.map { detection ->
+            val originalBbox = detection.bbox
+            
+            // 記錄原始座標以供調試
+            onDebugCallback("原始檢測座標: ${originalBbox}")
+            
+            com.example.trafficlight.inference.DetectionResult(
+                originalBbox,
+                detection.confidence,
+                detection.classId,
+                detection.label
+            )
+        }
     }
     
     private suspend fun runClassification(bitmap: Bitmap, currentTime: Long) {

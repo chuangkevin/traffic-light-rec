@@ -59,9 +59,9 @@ class InferenceEngine(private val context: Context) {
     private val classifierInputSize = 64
     
     companion object {
-        private const val DETECTOR_MODEL = "models/detector.onnx"
+        private const val DETECTOR_MODEL = "models/yolo_v5_f32.onnx"
         private const val CLASSIFIER_MODEL = "models/classifier.onnx"
-        private const val CONFIDENCE_THRESHOLD = 0.05f  // 更低的閾值以顯示更多檢測結果
+        private const val CONFIDENCE_THRESHOLD = 0.2f  // 合理的閾值以避免過多噪音
         private const val IOU_THRESHOLD = 0.45f
     }
     
@@ -97,7 +97,9 @@ class InferenceEngine(private val context: Context) {
         
         try {
             Log.d("InferenceEngine", "開始交通燈檢測，原始尺寸: ${bitmap.width}x${bitmap.height}")
-            val resizedBitmap = Bitmap.createScaledBitmap(bitmap, detectorInputSize, detectorInputSize, false)
+            
+            // 保持長寬比的縮放到 640x640，多餘部分填充黑色
+            val resizedBitmap = resizeBitmapWithPadding(bitmap, detectorInputSize, detectorInputSize)
             val inputTensor = createDetectorInputTensor(env, resizedBitmap)
             
             val outputs = session.run(mapOf("images" to inputTensor))
@@ -163,19 +165,29 @@ class InferenceEngine(private val context: Context) {
         
         val floatBuffer = FloatBuffer.allocate(3 * bitmap.width * bitmap.height)
         
-        // YOLOv8 期望的格式: CHW (Channel-Height-Width), RGB順序, 標準化到[0,1]
-        // R channel
-        for (pixel in pixels) {
-            floatBuffer.put(((pixel shr 16) and 0xFF) / 255.0f)
+        // 標準 YOLOv5s 期望 RGB [0,1] 正規化
+        val pixelCount = bitmap.width * bitmap.height
+        
+        // R channel 
+        for (i in 0 until pixelCount) {
+            val pixel = pixels[i]
+            val r = ((pixel shr 16) and 0xFF) / 255.0f
+            floatBuffer.put(r)
         }
-        // G channel  
-        for (pixel in pixels) {
-            floatBuffer.put(((pixel shr 8) and 0xFF) / 255.0f)
+        // G channel   
+        for (i in 0 until pixelCount) {
+            val pixel = pixels[i]
+            val g = ((pixel shr 8) and 0xFF) / 255.0f
+            floatBuffer.put(g)
         }
         // B channel
-        for (pixel in pixels) {
-            floatBuffer.put((pixel and 0xFF) / 255.0f)
+        for (i in 0 until pixelCount) {
+            val pixel = pixels[i]
+            val b = (pixel and 0xFF) / 255.0f
+            floatBuffer.put(b)
         }
+        
+        Log.d("InferenceEngine", "輸入預處理完成: ${pixelCount} 像素, RGB [0,1] 正規化")
         
         floatBuffer.rewind() // 重設 buffer 位置到開頭
         Log.d("InferenceEngine", "檢測器輸入張量形狀: [1, 3, ${bitmap.height}, ${bitmap.width}]")
@@ -218,52 +230,127 @@ class InferenceEngine(private val context: Context) {
         val tensorShape = outputTensor.info.shape
         Log.d("InferenceEngine", "檢測器輸出形狀: ${tensorShape.contentToString()}")
         
-        if (tensorShape.size >= 3) {
-            val numDetections = tensorShape[2].toInt() // 通常是8400
-            val numFeatures = tensorShape[1].toInt()   // 通常是84 (4 bbox + 1 conf + 80 classes)
+        if (tensorShape.size == 5) {
+            // YOLOv5 多尺度輸出格式: [1, 3, 80, 80, 85]
+            val batchSize = tensorShape[0].toInt()     // 1
+            val numAnchors = tensorShape[1].toInt()    // 3
+            val gridH = tensorShape[2].toInt()         // 80
+            val gridW = tensorShape[3].toInt()         // 80  
+            val numFeatures = tensorShape[4].toInt()   // 85
             
+            Log.d("InferenceEngine", "YOLOv5 多尺度格式: [$batchSize, $numAnchors, $gridH, $gridW, $numFeatures]")
+            
+            val totalDetections = numAnchors * gridH * gridW
+            Log.d("InferenceEngine", "總檢測數量: $totalDetections, 特徵數: $numFeatures")
+            
+            return parseYoloV5MultiScaleOutput(output, numAnchors, gridH, gridW, numFeatures, originalWidth, originalHeight)
+        } else if (tensorShape.size >= 3) {
+            // 標準3維輸出格式
+            val batchSize = tensorShape[0].toInt()
+            val numDetections = tensorShape[1].toInt()
+            val numFeatures = tensorShape[2].toInt()
+            
+            Log.d("InferenceEngine", "標準 YOLO 格式: [$batchSize, $numDetections, $numFeatures]")
             Log.d("InferenceEngine", "解析 $numDetections 個候選檢測，每個有 $numFeatures 個特徵")
             
             val scaleX = originalWidth.toFloat() / detectorInputSize
             val scaleY = originalHeight.toFloat() / detectorInputSize
             
-            for (i in 0 until numDetections) {
-                // YOLOv8 格式: [x_center, y_center, width, height, confidence, class_scores...]
-                val x_center = output[i] * scaleX
-                val y_center = output[numDetections + i] * scaleY
-                val width = output[2 * numDetections + i] * scaleX
-                val height = output[3 * numDetections + i] * scaleY
-                val confidence = output[4 * numDetections + i]
+            // YOLOv5 格式: [x_center, y_center, width, height, objectness, class0_score, class1_score, ...]
+            // 先檢查前幾個檢測結果作為調試
+            val debugSamples = minOf(3, numDetections)
+            for (i in 0 until debugSamples) {
+                val baseIndex = i * numFeatures
+                val x_center_raw = output[baseIndex]
+                val y_center_raw = output[baseIndex + 1]
+                val width_raw = output[baseIndex + 2]
+                val height_raw = output[baseIndex + 3]
+                val objectness = output[baseIndex + 4]
                 
-                if (confidence >= CONFIDENCE_THRESHOLD) {
+                Log.d("InferenceEngine", "樣本 $i: 正規化座標=($x_center_raw, $y_center_raw, $width_raw, $height_raw), objectness=$objectness")
+                
+                // 檢查前幾個類別分數，特別關注交通燈 (class 9)
+                var maxClassScore = 0f
+                var bestClassId = 0
+                val trafficLightScore = if (numFeatures > 14) output[baseIndex + 5 + 9] else 0f // class 9 = traffic light
+                
+                for (c in 0 until minOf(10, numFeatures - 5)) {
+                    val classScore = output[baseIndex + 5 + c]
+                    if (classScore > maxClassScore) {
+                        maxClassScore = classScore
+                        bestClassId = c
+                    }
+                }
+                Log.d("InferenceEngine", "樣本 $i: 最高類別 $bestClassId (${DetectionResult.getClassLabel(bestClassId)}): $maxClassScore")
+                Log.d("InferenceEngine", "樣本 $i: 交通燈分數 (class 9): $trafficLightScore")
+            }
+            
+            // 正常處理所有檢測
+            for (i in 0 until numDetections) {
+                val baseIndex = i * numFeatures
+                
+                // YOLOv5 格式解析 - 輸出是正規化座標 (0-1)
+                val x_center_norm = output[baseIndex]
+                val y_center_norm = output[baseIndex + 1] 
+                val width_norm = output[baseIndex + 2]
+                val height_norm = output[baseIndex + 3]
+                
+                // 標準 YOLOv5s 輸出正規化座標 [0,1]
+                val x_center_pixels = x_center_norm * detectorInputSize
+                val y_center_pixels = y_center_norm * detectorInputSize
+                val width_pixels = width_norm * detectorInputSize
+                val height_pixels = height_norm * detectorInputSize
+                
+                // 縮放到原始圖片尺寸
+                val x_center = x_center_pixels * scaleX
+                val y_center = y_center_pixels * scaleY
+                val width = width_pixels * scaleX
+                val height = height_pixels * scaleY
+                val objectness = output[baseIndex + 4]
+                
+                // 只處理 objectness 分數夠高的檢測
+                if (objectness >= 0.05f) {
                     // 找到最高分數的類別（從第5個特徵開始是類別分數）
                     var maxClassScore = 0f
                     var bestClassId = 0
                     for (c in 0 until (numFeatures - 5)) {
-                        val classScore = output[(5 + c) * numDetections + i]
+                        val classScore = output[baseIndex + 5 + c]
                         if (classScore > maxClassScore) {
                             maxClassScore = classScore
                             bestClassId = c
                         }
                     }
                     
-                    // 總信心度 = 物件信心度 * 類別信心度
-                    val totalConfidence = confidence * maxClassScore
+                    // YOLOv5 總信心度 = objectness * 最高類別分數
+                    val totalConfidence = objectness * maxClassScore
                     
-                    if (totalConfidence >= CONFIDENCE_THRESHOLD) {
-                        val x1 = x_center - width / 2
-                        val y1 = y_center - height / 2
-                        val x2 = x_center + width / 2
-                        val y2 = y_center + height / 2
+                    // 使用合理的閾值
+                    val testThreshold = 0.25f
+                    if (totalConfidence >= testThreshold) {
+                        // 計算邊界框座標並確保合理範圍
+                        val x1 = kotlin.math.max(0f, x_center - width / 2)
+                        val y1 = kotlin.math.max(0f, y_center - height / 2)
+                        val x2 = kotlin.math.min(originalWidth.toFloat(), x_center + width / 2)
+                        val y2 = kotlin.math.min(originalHeight.toFloat(), y_center + height / 2)
                         
-                        detections.add(DetectionResult(
-                            RectF(x1, y1, x2, y2),
-                            totalConfidence,
-                            bestClassId,
-                            DetectionResult.getClassLabel(bestClassId)
-                        ))
-                        
-                        Log.d("InferenceEngine", "檢測到物件: ${DetectionResult.getClassLabel(bestClassId)}, 信心度=$totalConfidence, bbox=($x1,$y1,$x2,$y2)")
+                        // 確保 x2 > x1 和 y2 > y1
+                        if (x2 > x1 && y2 > y1) {
+                            val label = DetectionResult.getClassLabel(bestClassId)
+                            detections.add(DetectionResult(
+                                RectF(x1, y1, x2, y2),
+                                totalConfidence,
+                                bestClassId,
+                                label
+                            ))
+                            
+                            Log.d("InferenceEngine", "檢測到物件: ${DetectionResult.getClassLabel(bestClassId)}, 信心度=$totalConfidence (obj=$objectness, cls=$maxClassScore)")
+                            Log.d("InferenceEngine", "正規化座標: center=($x_center_norm,$y_center_norm) size=($width_norm,$height_norm)")
+                            Log.d("InferenceEngine", "640px座標: center=($x_center_pixels,$y_center_pixels) size=($width_pixels,$height_pixels)")
+                            Log.d("InferenceEngine", "原始圖片座標: center=($x_center,$y_center) size=($width,$height)")
+                            Log.d("InferenceEngine", "最終 bbox: ($x1,$y1,$x2,$y2)")
+                        } else {
+                            Log.d("InferenceEngine", "跳過無效座標: center=($x_center,$y_center) size=($width,$height) -> bbox=($x1,$y1,$x2,$y2)")
+                        }
                     }
                 }
             }
@@ -283,6 +370,106 @@ class InferenceEngine(private val context: Context) {
         return ClassificationResult(maxIndex, confidence, probabilities)
     }
     
+    private fun parseYoloV5MultiScaleOutput(
+        output: FloatArray,
+        numAnchors: Int,
+        gridH: Int, 
+        gridW: Int,
+        numFeatures: Int,
+        originalWidth: Int,
+        originalHeight: Int
+    ): List<DetectionResult> {
+        val detections = mutableListOf<DetectionResult>()
+        
+        val scaleX = originalWidth.toFloat() / detectorInputSize
+        val scaleY = originalHeight.toFloat() / detectorInputSize
+        
+        // YOLOv5 anchor boxes (針對 640x640 輸入)
+        val anchors = arrayOf(
+            floatArrayOf(10f, 13f, 16f, 30f, 33f, 23f),      // P3/8
+            floatArrayOf(30f, 61f, 62f, 45f, 59f, 119f),     // P4/16  
+            floatArrayOf(116f, 90f, 156f, 198f, 373f, 326f)  // P5/32
+        )
+        
+        val stride = 8 // 針對 80x80 grid 的 stride
+        val anchorIndex = 0 // 使用 P3/8 的 anchors
+        
+        for (anchor in 0 until numAnchors) {
+            for (y in 0 until gridH) {
+                for (x in 0 until gridW) {
+                    val baseIndex = (anchor * gridH * gridW + y * gridW + x) * numFeatures
+                    
+                    if (baseIndex + numFeatures <= output.size) {
+                        val rawX = output[baseIndex]
+                        val rawY = output[baseIndex + 1] 
+                        val rawW = output[baseIndex + 2]
+                        val rawH = output[baseIndex + 3]
+                        val objectness = sigmoid(output[baseIndex + 4])
+                        
+                        // 簡化的座標解碼 - 先測試這個模型是否已經正規化
+                        val centerX = rawX * detectorInputSize // 直接使用原始輸出
+                        val centerY = rawY * detectorInputSize
+                        val width = rawW * detectorInputSize
+                        val height = rawH * detectorInputSize
+                        
+                        if (objectness >= 0.01f) {
+                            // 找到最高分數的類別
+                            var maxClassScore = 0f
+                            var bestClassId = 0
+                            for (c in 0 until (numFeatures - 5)) {
+                                val classScore = output[baseIndex + 5 + c] // 不使用 sigmoid
+                                if (classScore > maxClassScore) {
+                                    maxClassScore = classScore
+                                    bestClassId = c
+                                }
+                            }
+                            
+                            val totalConfidence = objectness * maxClassScore
+                            if (totalConfidence >= 0.01f) {
+                                // 縮放到原始圖片尺寸
+                                val scaledCenterX = centerX * scaleX
+                                val scaledCenterY = centerY * scaleY
+                                val scaledWidth = width * scaleX
+                                val scaledHeight = height * scaleY
+                                
+                                val x1 = kotlin.math.max(0f, scaledCenterX - scaledWidth / 2)
+                                val y1 = kotlin.math.max(0f, scaledCenterY - scaledHeight / 2)
+                                val x2 = kotlin.math.min(originalWidth.toFloat(), scaledCenterX + scaledWidth / 2)
+                                val y2 = kotlin.math.min(originalHeight.toFloat(), scaledCenterY + scaledHeight / 2)
+                                
+                                if (x2 > x1 && y2 > y1) {
+                                    detections.add(DetectionResult(
+                                        android.graphics.RectF(x1, y1, x2, y2),
+                                        totalConfidence,
+                                        bestClassId,
+                                        DetectionResult.getClassLabel(bestClassId)
+                                    ))
+                                    
+                                    Log.d("InferenceEngine", "=== 檢測到物件: ${DetectionResult.getClassLabel(bestClassId)} ===")
+                                    Log.d("InferenceEngine", "信心度: $totalConfidence (obj=$objectness, cls=$maxClassScore)")
+                                    Log.d("InferenceEngine", "Grid位置: ($x,$y), Anchor: $anchor")
+                                    Log.d("InferenceEngine", "原始輸出: ($rawX,$rawY,$rawW,$rawH)")
+                                    Log.d("InferenceEngine", "640px座標: center=($centerX,$centerY) size=($width,$height)")
+                                    Log.d("InferenceEngine", "縮放因子: scaleX=$scaleX, scaleY=$scaleY")
+                                    Log.d("InferenceEngine", "縮放後座標: center=($scaledCenterX,$scaledCenterY) size=($scaledWidth,$scaledHeight)")
+                                    Log.d("InferenceEngine", "最終 bbox: ($x1,$y1,$x2,$y2)")
+                                    Log.d("InferenceEngine", "=================")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Log.d("InferenceEngine", "初步檢測到 ${detections.size} 個候選物件")
+        return applyNMS(detections)
+    }
+    
+    private fun sigmoid(x: Float): Float {
+        return 1f / (1f + kotlin.math.exp(-x))
+    }
+
     private fun applyNMS(detections: List<DetectionResult>): List<DetectionResult> {
         if (detections.isEmpty()) return emptyList()
         
@@ -316,6 +503,28 @@ class InferenceEngine(private val context: Context) {
         return if (unionArea > 0) intersectionArea / unionArea else 0f
     }
     
+    private fun resizeBitmapWithPadding(bitmap: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
+        val scale = minOf(targetWidth.toFloat() / bitmap.width, targetHeight.toFloat() / bitmap.height)
+        val scaledWidth = (bitmap.width * scale).toInt()
+        val scaledHeight = (bitmap.height * scale).toInt()
+        
+        // 創建目標尺寸的黑色背景
+        val paddedBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(paddedBitmap)
+        canvas.drawColor(android.graphics.Color.BLACK)
+        
+        // 縮放原圖並居中放置
+        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, false)
+        val x = (targetWidth - scaledWidth) / 2
+        val y = (targetHeight - scaledHeight) / 2
+        canvas.drawBitmap(scaledBitmap, x.toFloat(), y.toFloat(), null)
+        
+        scaledBitmap.recycle()
+        
+        Log.d("InferenceEngine", "縮放: ${bitmap.width}x${bitmap.height} -> ${scaledWidth}x${scaledHeight}, 填充到 ${targetWidth}x${targetHeight}")
+        return paddedBitmap
+    }
+
     private fun cropRoi(bitmap: Bitmap, roi: RectF): Bitmap {
         val x = maxOf(0, roi.left.toInt())
         val y = maxOf(0, roi.top.toInt())

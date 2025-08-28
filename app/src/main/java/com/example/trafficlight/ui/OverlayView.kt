@@ -74,6 +74,10 @@ class OverlayView @JvmOverloads constructor(
     }
     
     fun updateDetections(detections: List<DetectionResult>) {
+        android.util.Log.d("OverlayView", "收到 ${detections.size} 個檢測結果")
+        for (detection in detections) {
+            android.util.Log.d("OverlayView", "檢測: ${detection.label}, 信心度: ${detection.confidence}, bbox: ${detection.bbox}")
+        }
         this.allDetections = detections
         invalidate()
     }
@@ -91,6 +95,9 @@ class OverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         
+        // 記錄畫布尺寸以供調試
+        android.util.Log.d("OverlayView", "Canvas 尺寸: ${canvas.width}x${canvas.height}, View 尺寸: ${width}x${height}")
+        
         drawAllDetections(canvas)
         drawStateIndicator(canvas)
         drawRoi(canvas)
@@ -98,7 +105,9 @@ class OverlayView @JvmOverloads constructor(
     }
     
     private fun drawAllDetections(canvas: Canvas) {
-        for (detection in allDetections) {
+        android.util.Log.d("OverlayView", "drawAllDetections: 繪製 ${allDetections.size} 個檢測結果，canvas 尺寸: ${width}x${height}")
+        for ((index, detection) in allDetections.withIndex()) {
+            android.util.Log.d("OverlayView", "繪製檢測 $index: ${detection.label}, bbox=${detection.bbox}")
             // 設定框線顏色 - 交通燈用特殊顏色標示
             val boxColor = if (detection.classId == 9) { // traffic light
                 ContextCompat.getColor(context, android.R.color.holo_red_light)
