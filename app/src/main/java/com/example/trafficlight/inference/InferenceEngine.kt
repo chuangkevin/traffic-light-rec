@@ -6,6 +6,7 @@ import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.FloatBuffer
@@ -39,24 +40,33 @@ class InferenceEngine(private val context: Context) {
     private val classifierInputSize = 64
     
     companion object {
-        private const val DETECTOR_MODEL = "detector.onnx"
-        private const val CLASSIFIER_MODEL = "classifier.onnx"
-        private const val CONFIDENCE_THRESHOLD = 0.25f
+        private const val DETECTOR_MODEL = "models/detector.onnx"
+        private const val CLASSIFIER_MODEL = "models/classifier.onnx"
+        private const val CONFIDENCE_THRESHOLD = 0.1f  // 降低閾值以增加檢測靈敏度
         private const val IOU_THRESHOLD = 0.45f
     }
     
     suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
         try {
+            Log.d("InferenceEngine", "開始初始化 AI 模型...")
             ortEnvironment = OrtEnvironment.getEnvironment()
+            Log.d("InferenceEngine", "ONNX 環境建立成功")
             
+            Log.d("InferenceEngine", "載入檢測模型: $DETECTOR_MODEL")
             val detectorModelBytes = context.assets.open(DETECTOR_MODEL).readBytes()
+            Log.d("InferenceEngine", "檢測模型載入成功，大小: ${detectorModelBytes.size} bytes")
+            
+            Log.d("InferenceEngine", "載入分類模型: $CLASSIFIER_MODEL")
             val classifierModelBytes = context.assets.open(CLASSIFIER_MODEL).readBytes()
+            Log.d("InferenceEngine", "分類模型載入成功，大小: ${classifierModelBytes.size} bytes")
             
             detectorSession = ortEnvironment?.createSession(detectorModelBytes)
             classifierSession = ortEnvironment?.createSession(classifierModelBytes)
             
+            Log.d("InferenceEngine", "AI 模型初始化完成")
             true
         } catch (e: Exception) {
+            Log.e("InferenceEngine", "AI 模型載入失敗: ${e.message}", e)
             e.printStackTrace()
             false
         }
@@ -67,6 +77,7 @@ class InferenceEngine(private val context: Context) {
         val env = ortEnvironment ?: return@withContext emptyList()
         
         try {
+            Log.d("InferenceEngine", "開始交通燈檢測，原始尺寸: ${bitmap.width}x${bitmap.height}")
             val resizedBitmap = Bitmap.createScaledBitmap(bitmap, detectorInputSize, detectorInputSize, false)
             val inputTensor = createDetectorInputTensor(env, resizedBitmap)
             
@@ -74,6 +85,7 @@ class InferenceEngine(private val context: Context) {
             val outputTensor = outputs.get(0) as OnnxTensor
             
             val detections = parseDetectorOutput(outputTensor, bitmap.width, bitmap.height)
+            Log.d("InferenceEngine", "檢測到 ${detections.size} 個交通燈")
             
             inputTensor.close()
             outputTensor.close()
@@ -81,6 +93,7 @@ class InferenceEngine(private val context: Context) {
             
             detections
         } catch (e: Exception) {
+            Log.e("InferenceEngine", "交通燈檢測失敗: ${e.message}", e)
             e.printStackTrace()
             emptyList()
         }
@@ -95,6 +108,7 @@ class InferenceEngine(private val context: Context) {
         )
         
         try {
+            Log.d("InferenceEngine", "開始交通燈分類，ROI: ${roi}")
             val roiBitmap = cropRoi(bitmap, roi)
             val resizedBitmap = Bitmap.createScaledBitmap(roiBitmap, classifierInputSize, classifierInputSize, false)
             val inputTensor = createClassifierInputTensor(env, resizedBitmap)
@@ -103,6 +117,7 @@ class InferenceEngine(private val context: Context) {
             val outputTensor = outputs.get(0) as OnnxTensor
             
             val result = parseClassifierOutput(outputTensor)
+            Log.d("InferenceEngine", "分類結果: 類別=${result.classId}, 信心度=${result.confidence}")
             
             inputTensor.close()
             outputTensor.close()
@@ -110,6 +125,7 @@ class InferenceEngine(private val context: Context) {
             
             result
         } catch (e: Exception) {
+            Log.e("InferenceEngine", "交通燈分類失敗: ${e.message}", e)
             e.printStackTrace()
             ClassificationResult(ClassificationResult.UNKNOWN, 0f, floatArrayOf())
         }
@@ -121,16 +137,22 @@ class InferenceEngine(private val context: Context) {
         
         val floatBuffer = FloatBuffer.allocate(3 * bitmap.width * bitmap.height)
         
+        // YOLOv8 期望的格式: CHW (Channel-Height-Width), RGB順序, 標準化到[0,1]
+        // R channel
         for (pixel in pixels) {
-            val r = ((pixel shr 16) and 0xFF) / 255.0f
-            val g = ((pixel shr 8) and 0xFF) / 255.0f
-            val b = (pixel and 0xFF) / 255.0f
-            
-            floatBuffer.put(r)
-            floatBuffer.put(g)
-            floatBuffer.put(b)
+            floatBuffer.put(((pixel shr 16) and 0xFF) / 255.0f)
+        }
+        // G channel  
+        for (pixel in pixels) {
+            floatBuffer.put(((pixel shr 8) and 0xFF) / 255.0f)
+        }
+        // B channel
+        for (pixel in pixels) {
+            floatBuffer.put((pixel and 0xFF) / 255.0f)
         }
         
+        floatBuffer.rewind() // 重設 buffer 位置到開頭
+        Log.d("InferenceEngine", "檢測器輸入張量形狀: [1, 3, ${bitmap.height}, ${bitmap.width}]")
         return OnnxTensor.createTensor(env, floatBuffer, longArrayOf(1, 3, bitmap.height.toLong(), bitmap.width.toLong()))
     }
     
@@ -140,16 +162,22 @@ class InferenceEngine(private val context: Context) {
         
         val floatBuffer = FloatBuffer.allocate(3 * bitmap.width * bitmap.height)
         
+        // MobileNetV3 期望的格式: CHW (Channel-Height-Width), RGB順序, 標準化到[0,1]
+        // R channel
         for (pixel in pixels) {
-            val r = ((pixel shr 16) and 0xFF) / 255.0f
-            val g = ((pixel shr 8) and 0xFF) / 255.0f
-            val b = (pixel and 0xFF) / 255.0f
-            
-            floatBuffer.put(r)
-            floatBuffer.put(g)
-            floatBuffer.put(b)
+            floatBuffer.put(((pixel shr 16) and 0xFF) / 255.0f)
+        }
+        // G channel  
+        for (pixel in pixels) {
+            floatBuffer.put(((pixel shr 8) and 0xFF) / 255.0f)
+        }
+        // B channel
+        for (pixel in pixels) {
+            floatBuffer.put((pixel and 0xFF) / 255.0f)
         }
         
+        floatBuffer.rewind() // 重設 buffer 位置到開頭
+        Log.d("InferenceEngine", "分類器輸入張量形狀: [1, 3, ${bitmap.height}, ${bitmap.width}]")
         return OnnxTensor.createTensor(env, floatBuffer, longArrayOf(1, 3, bitmap.height.toLong(), bitmap.width.toLong()))
     }
     
@@ -157,27 +185,66 @@ class InferenceEngine(private val context: Context) {
         val output = outputTensor.floatBuffer.array()
         val detections = mutableListOf<DetectionResult>()
         
-        val numDetections = output.size / 6
-        val scaleX = originalWidth.toFloat() / detectorInputSize
-        val scaleY = originalHeight.toFloat() / detectorInputSize
+        Log.d("InferenceEngine", "檢測器輸出張量大小: ${output.size}")
         
-        for (i in 0 until numDetections) {
-            val confidence = output[i * 6 + 4]
-            if (confidence >= CONFIDENCE_THRESHOLD) {
-                val x1 = output[i * 6] * scaleX
-                val y1 = output[i * 6 + 1] * scaleY
-                val x2 = output[i * 6 + 2] * scaleX
-                val y2 = output[i * 6 + 3] * scaleY
-                val classId = output[i * 6 + 5].toInt()
+        // YOLOv8 輸出格式通常是 [1, 84, 8400] 或類似
+        // 需要根據實際模型輸出調整解析方式
+        val tensorShape = outputTensor.info.shape
+        Log.d("InferenceEngine", "檢測器輸出形狀: ${tensorShape.contentToString()}")
+        
+        if (tensorShape.size >= 3) {
+            val numDetections = tensorShape[2].toInt() // 通常是8400
+            val numFeatures = tensorShape[1].toInt()   // 通常是84 (4 bbox + 1 conf + 80 classes)
+            
+            Log.d("InferenceEngine", "解析 $numDetections 個候選檢測，每個有 $numFeatures 個特徵")
+            
+            val scaleX = originalWidth.toFloat() / detectorInputSize
+            val scaleY = originalHeight.toFloat() / detectorInputSize
+            
+            for (i in 0 until numDetections) {
+                // YOLOv8 格式: [x_center, y_center, width, height, confidence, class_scores...]
+                val x_center = output[i] * scaleX
+                val y_center = output[numDetections + i] * scaleY
+                val width = output[2 * numDetections + i] * scaleX
+                val height = output[3 * numDetections + i] * scaleY
+                val confidence = output[4 * numDetections + i]
                 
-                detections.add(DetectionResult(
-                    RectF(x1, y1, x2, y2),
-                    confidence,
-                    classId
-                ))
+                if (confidence >= CONFIDENCE_THRESHOLD) {
+                    // 找到最高分數的類別（從第5個特徵開始是類別分數）
+                    var maxClassScore = 0f
+                    var bestClassId = 0
+                    for (c in 0 until (numFeatures - 5)) {
+                        val classScore = output[(5 + c) * numDetections + i]
+                        if (classScore > maxClassScore) {
+                            maxClassScore = classScore
+                            bestClassId = c
+                        }
+                    }
+                    
+                    // 總信心度 = 物件信心度 * 類別信心度
+                    val totalConfidence = confidence * maxClassScore
+                    
+                    if (totalConfidence >= CONFIDENCE_THRESHOLD) {
+                        val x1 = x_center - width / 2
+                        val y1 = y_center - height / 2
+                        val x2 = x_center + width / 2
+                        val y2 = y_center + height / 2
+                        
+                        detections.add(DetectionResult(
+                            RectF(x1, y1, x2, y2),
+                            totalConfidence,
+                            bestClassId
+                        ))
+                        
+                        Log.d("InferenceEngine", "檢測到交通燈: 信心度=$totalConfidence, 類別=$bestClassId, bbox=($x1,$y1,$x2,$y2)")
+                    }
+                }
             }
+        } else {
+            Log.e("InferenceEngine", "未知的檢測器輸出格式")
         }
         
+        Log.d("InferenceEngine", "初步檢測到 ${detections.size} 個候選物件")
         return applyNMS(detections)
     }
     
