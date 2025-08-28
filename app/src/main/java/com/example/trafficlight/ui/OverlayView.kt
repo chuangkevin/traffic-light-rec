@@ -102,8 +102,8 @@ class OverlayView @JvmOverloads constructor(
             val confidenceText = "${(confidence * 100).toInt()}%"
             val confidenceTextPaint = Paint(textPaint).apply {
                 textSize = 28f
-                alpha = 180
             }
+            confidenceTextPaint.alpha = 180
             val confidenceY = indicatorRect.bottom + 35f
             canvas.drawText(confidenceText, indicatorRect.centerX(), confidenceY, confidenceTextPaint)
         }
