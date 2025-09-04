@@ -325,7 +325,7 @@ class InferenceEngine(private val context: Context) {
                     val totalConfidence = objectness * maxClassScore
                     
                     // 使用合理的閾值
-                    val testThreshold = 0.25f
+                    val testThreshold = 0.1f
                     if (totalConfidence >= testThreshold) {
                         // 計算邊界框座標並確保合理範圍
                         val x1 = kotlin.math.max(0f, x_center - width / 2)
@@ -373,97 +373,91 @@ class InferenceEngine(private val context: Context) {
     private fun parseYoloV5MultiScaleOutput(
         output: FloatArray,
         numAnchors: Int,
-        gridH: Int, 
+        gridH: Int,
         gridW: Int,
         numFeatures: Int,
         originalWidth: Int,
         originalHeight: Int
     ): List<DetectionResult> {
         val detections = mutableListOf<DetectionResult>()
-        
+        val numClasses = numFeatures - 5
+
         val scaleX = originalWidth.toFloat() / detectorInputSize
         val scaleY = originalHeight.toFloat() / detectorInputSize
-        
-        // YOLOv5 anchor boxes (針對 640x640 輸入)
+
+        // Anchors for P3/8, P4/16, P5/32 strides
         val anchors = arrayOf(
-            floatArrayOf(10f, 13f, 16f, 30f, 33f, 23f),      // P3/8
-            floatArrayOf(30f, 61f, 62f, 45f, 59f, 119f),     // P4/16  
-            floatArrayOf(116f, 90f, 156f, 198f, 373f, 326f)  // P5/32
+            floatArrayOf(10f, 13f, 16f, 30f, 33f, 23f),      // P3/8 (80x80 grid)
+            floatArrayOf(30f, 61f, 62f, 45f, 59f, 119f),     // P4/16 (40x40 grid)
+            floatArrayOf(116f, 90f, 156f, 198f, 373f, 326f)  // P5/32 (20x20 grid)
         )
-        
-        val stride = 8 // 針對 80x80 grid 的 stride
-        val anchorIndex = 0 // 使用 P3/8 的 anchors
-        
-        for (anchor in 0 until numAnchors) {
-            for (y in 0 until gridH) {
-                for (x in 0 until gridW) {
-                    val baseIndex = (anchor * gridH * gridW + y * gridW + x) * numFeatures
-                    
-                    if (baseIndex + numFeatures <= output.size) {
-                        val rawX = output[baseIndex]
-                        val rawY = output[baseIndex + 1] 
-                        val rawW = output[baseIndex + 2]
-                        val rawH = output[baseIndex + 3]
-                        val objectness = sigmoid(output[baseIndex + 4])
-                        
-                        // 簡化的座標解碼 - 先測試這個模型是否已經正規化
-                        val centerX = rawX * detectorInputSize // 直接使用原始輸出
-                        val centerY = rawY * detectorInputSize
-                        val width = rawW * detectorInputSize
-                        val height = rawH * detectorInputSize
-                        
-                        if (objectness >= 0.01f) {
-                            // 找到最高分數的類別
-                            var maxClassScore = 0f
-                            var bestClassId = 0
-                            for (c in 0 until (numFeatures - 5)) {
-                                val classScore = output[baseIndex + 5 + c] // 不使用 sigmoid
-                                if (classScore > maxClassScore) {
-                                    maxClassScore = classScore
-                                    bestClassId = c
-                                }
+
+        // Determine stride and anchor set based on grid size
+        val (stride, anchorSet) = when(gridH) {
+            80 -> 8 to anchors[0]
+            40 -> 16 to anchors[1]
+            20 -> 32 to anchors[2]
+            else -> return emptyList() // Should not happen for YOLOv5
+        }
+
+        for (y in 0 until gridH) {
+            for (x in 0 until gridW) {
+                for (anchor in 0 until numAnchors) {
+                    val baseIndex = (y * gridW * numAnchors + x * numAnchors + anchor) * numFeatures
+
+                    if (baseIndex + numFeatures > output.size) continue
+
+                    val objectness = sigmoid(output[baseIndex + 4])
+
+                    if (objectness >= CONFIDENCE_THRESHOLD) {
+                        var maxClassScore = 0f
+                        var bestClassId = -1
+                        for (c in 0 until numClasses) {
+                            val classScore = sigmoid(output[baseIndex + 5 + c])
+                            if (classScore > maxClassScore) {
+                                maxClassScore = classScore
+                                bestClassId = c
                             }
-                            
-                            val totalConfidence = objectness * maxClassScore
-                            if (totalConfidence >= 0.01f) {
-                                // 縮放到原始圖片尺寸
-                                val scaledCenterX = centerX * scaleX
-                                val scaledCenterY = centerY * scaleY
-                                val scaledWidth = width * scaleX
-                                val scaledHeight = height * scaleY
-                                
-                                val x1 = kotlin.math.max(0f, scaledCenterX - scaledWidth / 2)
-                                val y1 = kotlin.math.max(0f, scaledCenterY - scaledHeight / 2)
-                                val x2 = kotlin.math.min(originalWidth.toFloat(), scaledCenterX + scaledWidth / 2)
-                                val y2 = kotlin.math.min(originalHeight.toFloat(), scaledCenterY + scaledHeight / 2)
-                                
-                                if (x2 > x1 && y2 > y1) {
-                                    detections.add(DetectionResult(
-                                        android.graphics.RectF(x1, y1, x2, y2),
-                                        totalConfidence,
-                                        bestClassId,
-                                        DetectionResult.getClassLabel(bestClassId)
-                                    ))
-                                    
-                                    Log.d("InferenceEngine", "=== 檢測到物件: ${DetectionResult.getClassLabel(bestClassId)} ===")
-                                    Log.d("InferenceEngine", "信心度: $totalConfidence (obj=$objectness, cls=$maxClassScore)")
-                                    Log.d("InferenceEngine", "Grid位置: ($x,$y), Anchor: $anchor")
-                                    Log.d("InferenceEngine", "原始輸出: ($rawX,$rawY,$rawW,$rawH)")
-                                    Log.d("InferenceEngine", "640px座標: center=($centerX,$centerY) size=($width,$height)")
-                                    Log.d("InferenceEngine", "縮放因子: scaleX=$scaleX, scaleY=$scaleY")
-                                    Log.d("InferenceEngine", "縮放後座標: center=($scaledCenterX,$scaledCenterY) size=($scaledWidth,$scaledHeight)")
-                                    Log.d("InferenceEngine", "最終 bbox: ($x1,$y1,$x2,$y2)")
-                                    Log.d("InferenceEngine", "=================")
-                                }
+                        }
+
+                        val totalConfidence = objectness * maxClassScore
+                        if (totalConfidence >= CONFIDENCE_THRESHOLD) {
+                            val rawX = output[baseIndex]
+                            val rawY = output[baseIndex + 1]
+                            val rawW = output[baseIndex + 2]
+                            val rawH = output[baseIndex + 3]
+
+                            // Decode coordinates
+                            val centerX = (sigmoid(rawX) * 2 - 0.5f + x) * stride
+                            val centerY = (sigmoid(rawY) * 2 - 0.5f + y) * stride
+                            val width = (sigmoid(rawW) * 2).let { it * it } * anchorSet[anchor * 2]
+                            val height = (sigmoid(rawH) * 2).let { it * it } * anchorSet[anchor * 2 + 1]
+
+                            // Scale to original image dimensions
+                            val scaledCenterX = centerX * scaleX
+                            val scaledCenterY = centerY * scaleY
+                            val scaledWidth = width * scaleX
+                            val scaledHeight = height * scaleY
+
+                            val x1 = kotlin.math.max(0f, scaledCenterX - scaledWidth / 2)
+                            val y1 = kotlin.math.max(0f, scaledCenterY - scaledHeight / 2)
+                            val x2 = kotlin.math.min(originalWidth.toFloat(), scaledCenterX + scaledWidth / 2)
+                            val y2 = kotlin.math.min(originalHeight.toFloat(), scaledCenterY + scaledHeight / 2)
+
+                            if (x2 > x1 && y2 > y1) {
+                                detections.add(DetectionResult(
+                                    RectF(x1, y1, x2, y2),
+                                    totalConfidence,
+                                    bestClassId,
+                                    DetectionResult.getClassLabel(bestClassId)
+                                ))
                             }
                         }
                     }
                 }
             }
         }
-        
-        Log.d("InferenceEngine", "初步檢測到 ${detections.size} 個候選物件")
-        return applyNMS(detections)
+        return detections // NMS is applied outside this function
     }
     
     private fun sigmoid(x: Float): Float {
