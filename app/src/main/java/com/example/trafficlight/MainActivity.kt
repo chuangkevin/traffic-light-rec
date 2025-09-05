@@ -102,6 +102,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             onResultCallback = ::onAnalysisResult,
             onDebugCallback = ::updateDebugText
         )
+
+        // Pass view dimensions to analyzer once the view is laid out
+        overlayView.post {
+            frameAnalyzer.setViewDimensions(overlayView.width, overlayView.height)
+        }
         
         textToSpeech = TextToSpeech(this, this)
         
@@ -109,13 +114,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun setupStateObservers() {
-        stateMachine.currentState
-            .onEach { state ->
-                overlayView.updateState(state, stateMachine.getStateConfidence())
-                overlayView.updateRoi(roiSelector.getCurrentRoi())
-                overlayView.animateStateChange(state)
-            }
-            .launchIn(lifecycleScope)
+        
             
         stateMachine.shouldAnnounce
             .onEach { shouldAnnounce ->
@@ -228,7 +227,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             fpsText.text = "FPS: ${result.fps}"
             
             // 更新所有檢測結果到 overlay
-            overlayView.updateDetections(result.allDetections)
+            overlayView.setResults(result.detections, result.imageWidth, result.imageHeight, result.imageRotation)
             
             Log.d("Analysis", "${result.debugInfo}")
         }
@@ -250,8 +249,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             null,
             "traffic_light_$state"
         )
-        
-        overlayView.showDetectionPulse()
     }
 
     override fun onInit(status: Int) {

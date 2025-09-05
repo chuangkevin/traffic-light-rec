@@ -13,4 +13,6 @@
     <color name="yellow_light">#FFFFFF00</color>
     <color name="green_light">#FF00FF00</color>
     <color name="light_off">#FF808080</color>
+
+    <color name="detection_box_color">#FF0000</color>
 </resources>
