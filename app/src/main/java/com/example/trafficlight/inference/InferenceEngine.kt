@@ -1,40 +1,29 @@
 package com.example.trafficlight.inference
 
+import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.RectF
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 data class DetectionResult(
     val bbox: RectF,
     val confidence: Float,
     val classId: Int,
-    val label: String = getClassLabel(classId)
-) {
-    companion object {
-        fun getClassLabel(classId: Int): String {
-            // COCO dataset class labels (commonly used in YOLO models)
-            val labels = arrayOf(
-                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
-                "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
-                "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-                "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
-                "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
-                "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-                "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
-                "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors",
-                "teddy bear", "hair drier", "toothbrush"
-            )
-            return if (classId in 0 until labels.size) labels[classId] else "unknown_$classId"
-        }
-    }
-}
+    val label: String,
+    val colorHint: Int? = null
+)
 
 data class ClassificationResult(
     val classId: Int,
@@ -50,491 +39,569 @@ data class ClassificationResult(
     }
 }
 
+data class DrivingPlanResult(
+    val shouldStop: Boolean,
+    val shouldGo: Boolean,
+    val confidence: Float,
+    val nearVelocity: Float,
+    val futureVelocity: Float,
+    val desiredAcceleration: Float,
+    val action: DrivingAction,
+    val path: List<PlanPoint> = emptyList(),
+    val calibration: CameraCalibrationEstimate = CameraCalibrationEstimate()
+)
+
+enum class DrivingAction {
+    STOP,
+    GO,
+    HOLD
+}
+
+data class PlanPoint(
+    val x: Float,
+    val y: Float
+)
+
+data class CameraCalibrationEstimate(
+    val pitchDeg: Float = 5.5f,
+    val yawDeg: Float = 0f,
+    val heightM: Float = 1.35f,
+    val valid: Boolean = false,
+    val sampleCount: Int = 0
+)
+
 class InferenceEngine(private val context: Context) {
     private var ortEnvironment: OrtEnvironment? = null
-    private var detectorSession: OrtSession? = null
-    private var classifierSession: OrtSession? = null
-    
-    private val detectorInputSize = 640
-    private val classifierInputSize = 64
-    
+    private var visionSession: OrtSession? = null
+    private var policySession: OrtSession? = null
+
+    private val modelWidth = 512
+    private val modelHeight = 256
+    private val packedFrameSize = 6 * 128 * 256
+    private val featureBuffer = Array(POLICY_FRAMES) { FloatArray(FEATURE_LEN) }
+    private var previousFrame: ByteArray? = null
+    private var previousBigFrame: ByteArray? = null
+    private var autoPitchDeg = 5.5f
+    private var autoYawDeg = 0f
+    private var autoHeightM = 1.35f
+    private var calibrationValid = false
+    private var calibrationSampleCount = 0
+    private var warpWasActive = false
+
     companion object {
-        private const val DETECTOR_MODEL = "models/yolo_v5_f32.onnx"
-        private const val CLASSIFIER_MODEL = "models/classifier.onnx"
-        private const val CONFIDENCE_THRESHOLD = 0.2f  // 合理的閾值以避免過多噪音
-        private const val IOU_THRESHOLD = 0.45f
+        private const val VISION_MODEL = "models/openpilot_driving_vision.onnx"
+        private const val POLICY_MODEL = "models/openpilot_driving_policy.onnx"
+        private const val POLICY_FRAMES = 25
+        private const val FEATURE_LEN = 512
+        private const val VISION_POSE_START = 87
+        private const val VISION_WIDE_FROM_DEVICE_EULER_START = 99
+        private const val VISION_ROAD_TRANSFORM_START = 105
+        private const val VISION_HIDDEN_STATE_START = 1064
+        private const val PLAN_VALUES = 33 * 15
+        private const val PLAN_WIDTH = 15
+        private const val PLAN_ACCELERATION_X = 6
+        private const val PLAN_VELOCITY_X = 3
+        private const val MIN_STABLE_DELAY_S = 0.3f
+        private const val MODEL_ACTION_T_S = 0.075f
+        private const val STOPPING_VELOCITY_MPS = 0.3f
+        private const val GO_ACCELERATION_MPS2 = 0.45f
+        private const val GO_VELOCITY_DELTA_MPS = 0.35f
+        private const val CALIBRATION_MIN_SAMPLES = 20
+        private const val SOURCE_CAMERA_FOV_DEG = 72f
+        private const val MEDMODEL_FL = 910f
+        private const val MEDMODEL_CX = 256f
+        private const val MEDMODEL_CY = 47.6f
+        private const val SBIGMODEL_FL = 455f
+        private const val SBIGMODEL_CX = 256f
+        private const val SBIGMODEL_CY = 151.8f
     }
-    
+
     suspend fun initialize(): Boolean = withContext(Dispatchers.IO) {
         try {
-            Log.d("InferenceEngine", "開始初始化 AI 模型...")
+            Log.d("InferenceEngine", "初始化 openpilot driving models...")
             ortEnvironment = OrtEnvironment.getEnvironment()
-            Log.d("InferenceEngine", "ONNX 環境建立成功")
-            
-            Log.d("InferenceEngine", "載入檢測模型: $DETECTOR_MODEL")
-            val detectorModelBytes = context.assets.open(DETECTOR_MODEL).readBytes()
-            Log.d("InferenceEngine", "檢測模型載入成功，大小: ${detectorModelBytes.size} bytes")
-            
-            Log.d("InferenceEngine", "載入分類模型: $CLASSIFIER_MODEL")
-            val classifierModelBytes = context.assets.open(CLASSIFIER_MODEL).readBytes()
-            Log.d("InferenceEngine", "分類模型載入成功，大小: ${classifierModelBytes.size} bytes")
-            
-            detectorSession = ortEnvironment?.createSession(detectorModelBytes)
-            classifierSession = ortEnvironment?.createSession(classifierModelBytes)
-            
-            Log.d("InferenceEngine", "AI 模型初始化完成")
+            val env = ortEnvironment ?: return@withContext false
+
+            val visionBytes = context.assets.open(VISION_MODEL).readBytes()
+            val policyBytes = context.assets.open(POLICY_MODEL).readBytes()
+            Log.d("InferenceEngine", "vision model: ${visionBytes.size} bytes")
+            Log.d("InferenceEngine", "policy model: ${policyBytes.size} bytes")
+
+            visionSession = env.createSession(visionBytes)
+            policySession = env.createSession(policyBytes)
+            Log.d("InferenceEngine", "openpilot models ready")
             true
         } catch (e: Exception) {
-            Log.e("InferenceEngine", "AI 模型載入失敗: ${e.message}", e)
-            e.printStackTrace()
+            Log.e("InferenceEngine", "openpilot model init failed: ${e.message}", e)
             false
         }
     }
-    
-    suspend fun detectTrafficLights(bitmap: Bitmap): List<DetectionResult> = withContext(Dispatchers.Default) {
-        val session = detectorSession ?: return@withContext emptyList()
-        val env = ortEnvironment ?: return@withContext emptyList()
-        
-        try {
-            Log.d("InferenceEngine", "開始交通燈檢測，原始尺寸: ${bitmap.width}x${bitmap.height}")
-            
-            // 保持長寬比的縮放到 640x640，多餘部分填充黑色
-            val resizedBitmap = resizeBitmapWithPadding(bitmap, detectorInputSize, detectorInputSize)
-            val inputTensor = createDetectorInputTensor(env, resizedBitmap)
-            
-            val outputs = session.run(mapOf("images" to inputTensor))
-            val outputTensor = outputs.get(0) as OnnxTensor
-            
-            val detections = parseDetectorOutput(outputTensor, bitmap.width, bitmap.height)
-            Log.d("InferenceEngine", "檢測到 ${detections.size} 個物件")
-            
-            inputTensor.close()
-            outputTensor.close()
-            outputs.close()
-            
-            detections
-        } catch (e: Exception) {
-            Log.e("InferenceEngine", "物件檢測失敗: ${e.message}", e)
-            e.printStackTrace()
-            emptyList()
-        }
-    }
 
-    // 專門用於取得交通燈檢測結果的函數
-    suspend fun detectTrafficLightsOnly(bitmap: Bitmap): List<DetectionResult> = withContext(Dispatchers.Default) {
-        val allDetections = detectTrafficLights(bitmap)
-        // 過濾出交通燈 (classId = 9 in COCO dataset)
-        return@withContext allDetections.filter { it.classId == 9 }
-    }
-    
-    suspend fun classifyTrafficLight(bitmap: Bitmap, roi: RectF): ClassificationResult = withContext(Dispatchers.Default) {
-        val session = classifierSession ?: return@withContext ClassificationResult(
-            ClassificationResult.UNKNOWN, 0f, floatArrayOf()
-        )
-        val env = ortEnvironment ?: return@withContext ClassificationResult(
-            ClassificationResult.UNKNOWN, 0f, floatArrayOf()
-        )
-        
+    suspend fun analyzeDrivingPlan(bitmap: Bitmap): DrivingPlanResult = withContext(Dispatchers.Default) {
+        val env = ortEnvironment ?: return@withContext emptyPlanResult()
+        val vision = visionSession ?: return@withContext emptyPlanResult()
+        val policy = policySession ?: return@withContext emptyPlanResult()
+
         try {
-            Log.d("InferenceEngine", "開始交通燈分類，ROI: ${roi}")
-            val roiBitmap = cropRoi(bitmap, roi)
-            val resizedBitmap = Bitmap.createScaledBitmap(roiBitmap, classifierInputSize, classifierInputSize, false)
-            val inputTensor = createClassifierInputTensor(env, resizedBitmap)
-            
-            val outputs = session.run(mapOf("input" to inputTensor))
-            val outputTensor = outputs.get(0) as OnnxTensor
-            
-            val result = parseClassifierOutput(outputTensor)
-            Log.d("InferenceEngine", "分類結果: 類別=${result.classId}, 信心度=${result.confidence}")
-            
-            inputTensor.close()
-            outputTensor.close()
-            outputs.close()
-            
+            val currentFrame = packOpenpilotFrame(bitmap, bigModelFrame = false)
+            val priorFrame = previousFrame ?: currentFrame
+            previousFrame = currentFrame
+            val currentBigFrame = packOpenpilotFrame(bitmap, bigModelFrame = true)
+            val priorBigFrame = previousBigFrame ?: currentBigFrame
+            previousBigFrame = currentBigFrame
+
+            val stacked = ByteBuffer
+                .allocateDirect(packedFrameSize * 2)
+                .order(ByteOrder.nativeOrder())
+            stacked.put(priorFrame)
+            stacked.put(currentFrame)
+            stacked.rewind()
+            val bigStacked = ByteBuffer
+                .allocateDirect(packedFrameSize * 2)
+                .order(ByteOrder.nativeOrder())
+            bigStacked.put(priorBigFrame)
+            bigStacked.put(currentBigFrame)
+            bigStacked.rewind()
+
+            val imgTensor = OnnxTensor.createTensor(
+                env,
+                stacked,
+                longArrayOf(1, 12, 128, 256),
+                OnnxJavaType.UINT8
+            )
+            val bigImgTensor = OnnxTensor.createTensor(
+                env,
+                bigStacked,
+                longArrayOf(1, 12, 128, 256),
+                OnnxJavaType.UINT8
+            )
+
+            val visionOutputs = vision.run(mapOf("img" to imgTensor, "big_img" to bigImgTensor))
+            val visionTensor = visionOutputs.get(0) as OnnxTensor
+            val visionData = readFloatOutput(visionTensor)
+            if (updateAutoCalibration(visionData)) {
+                resetTemporalBuffers()
+            }
+
+            shiftFeatureBuffer(visionData.copyOfRange(VISION_HIDDEN_STATE_START, VISION_HIDDEN_STATE_START + FEATURE_LEN))
+
+            val desireTensor = createZeroHalfTensor(env, longArrayOf(1, POLICY_FRAMES.toLong(), 8))
+            val trafficConventionTensor = createTrafficConventionTensor(env)
+            val featuresTensor = createFeaturesTensor(env)
+
+            val policyOutputs = policy.run(mapOf(
+                "desire_pulse" to desireTensor,
+                "traffic_convention" to trafficConventionTensor,
+                "features_buffer" to featuresTensor
+            ))
+            val policyTensor = policyOutputs.get(0) as OnnxTensor
+            val policyData = readFloatOutput(policyTensor)
+            val result = parseDrivingPlan(policyData)
+
+            policyTensor.close()
+            policyOutputs.close()
+            desireTensor.close()
+            trafficConventionTensor.close()
+            featuresTensor.close()
+            visionTensor.close()
+            visionOutputs.close()
+            imgTensor.close()
+            bigImgTensor.close()
+
             result
         } catch (e: Exception) {
-            Log.e("InferenceEngine", "交通燈分類失敗: ${e.message}", e)
-            e.printStackTrace()
-            ClassificationResult(ClassificationResult.UNKNOWN, 0f, floatArrayOf())
+            Log.e("InferenceEngine", "openpilot inference failed: ${e.message}", e)
+            emptyPlanResult()
         }
     }
-    
-    private fun createDetectorInputTensor(env: OrtEnvironment, bitmap: Bitmap): OnnxTensor {
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        
-        val floatBuffer = FloatBuffer.allocate(3 * bitmap.width * bitmap.height)
-        
-        // 標準 YOLOv5s 期望 RGB [0,1] 正規化
-        val pixelCount = bitmap.width * bitmap.height
-        
-        // R channel 
-        for (i in 0 until pixelCount) {
-            val pixel = pixels[i]
-            val r = ((pixel shr 16) and 0xFF) / 255.0f
-            floatBuffer.put(r)
-        }
-        // G channel   
-        for (i in 0 until pixelCount) {
-            val pixel = pixels[i]
-            val g = ((pixel shr 8) and 0xFF) / 255.0f
-            floatBuffer.put(g)
-        }
-        // B channel
-        for (i in 0 until pixelCount) {
-            val pixel = pixels[i]
-            val b = (pixel and 0xFF) / 255.0f
-            floatBuffer.put(b)
-        }
-        
-        Log.d("InferenceEngine", "輸入預處理完成: ${pixelCount} 像素, RGB [0,1] 正規化")
-        
-        floatBuffer.rewind() // 重設 buffer 位置到開頭
-        Log.d("InferenceEngine", "檢測器輸入張量形狀: [1, 3, ${bitmap.height}, ${bitmap.width}]")
-        return OnnxTensor.createTensor(env, floatBuffer, longArrayOf(1, 3, bitmap.height.toLong(), bitmap.width.toLong()))
-    }
-    
-    private fun createClassifierInputTensor(env: OrtEnvironment, bitmap: Bitmap): OnnxTensor {
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        
-        val floatBuffer = FloatBuffer.allocate(3 * bitmap.width * bitmap.height)
-        
-        // MobileNetV3 期望的格式: CHW (Channel-Height-Width), RGB順序, 標準化到[0,1]
-        // R channel
-        for (pixel in pixels) {
-            floatBuffer.put(((pixel shr 16) and 0xFF) / 255.0f)
-        }
-        // G channel  
-        for (pixel in pixels) {
-            floatBuffer.put(((pixel shr 8) and 0xFF) / 255.0f)
-        }
-        // B channel
-        for (pixel in pixels) {
-            floatBuffer.put((pixel and 0xFF) / 255.0f)
-        }
-        
-        floatBuffer.rewind() // 重設 buffer 位置到開頭
-        Log.d("InferenceEngine", "分類器輸入張量形狀: [1, 3, ${bitmap.height}, ${bitmap.width}]")
-        return OnnxTensor.createTensor(env, floatBuffer, longArrayOf(1, 3, bitmap.height.toLong(), bitmap.width.toLong()))
-    }
-    
-    private fun parseDetectorOutput(outputTensor: OnnxTensor, originalWidth: Int, originalHeight: Int): List<DetectionResult> {
-        val output = outputTensor.floatBuffer.array()
-        val detections = mutableListOf<DetectionResult>()
-        
-        Log.d("InferenceEngine", "檢測器輸出張量大小: ${output.size}")
-        
-        // YOLOv8 輸出格式通常是 [1, 84, 8400] 或類似
-        // 需要根據實際模型輸出調整解析方式
-        val tensorShape = outputTensor.info.shape
-        Log.d("InferenceEngine", "檢測器輸出形狀: ${tensorShape.contentToString()}")
-        
-        if (tensorShape.size == 5) {
-            // YOLOv5 多尺度輸出格式: [1, 3, 80, 80, 85]
-            val batchSize = tensorShape[0].toInt()     // 1
-            val numAnchors = tensorShape[1].toInt()    // 3
-            val gridH = tensorShape[2].toInt()         // 80
-            val gridW = tensorShape[3].toInt()         // 80  
-            val numFeatures = tensorShape[4].toInt()   // 85
-            
-            Log.d("InferenceEngine", "YOLOv5 多尺度格式: [$batchSize, $numAnchors, $gridH, $gridW, $numFeatures]")
-            
-            val totalDetections = numAnchors * gridH * gridW
-            Log.d("InferenceEngine", "總檢測數量: $totalDetections, 特徵數: $numFeatures")
-            
-            return parseYoloV5MultiScaleOutput(output, numAnchors, gridH, gridW, numFeatures, originalWidth, originalHeight)
-        } else if (tensorShape.size >= 3) {
-            // 標準3維輸出格式
-            val batchSize = tensorShape[0].toInt()
-            val numDetections = tensorShape[1].toInt()
-            val numFeatures = tensorShape[2].toInt()
-            
-            Log.d("InferenceEngine", "標準 YOLO 格式: [$batchSize, $numDetections, $numFeatures]")
-            Log.d("InferenceEngine", "解析 $numDetections 個候選檢測，每個有 $numFeatures 個特徵")
-            
-            val scaleX = originalWidth.toFloat() / detectorInputSize
-            val scaleY = originalHeight.toFloat() / detectorInputSize
-            
-            // YOLOv5 格式: [x_center, y_center, width, height, objectness, class0_score, class1_score, ...]
-            // 先檢查前幾個檢測結果作為調試
-            val debugSamples = minOf(3, numDetections)
-            for (i in 0 until debugSamples) {
-                val baseIndex = i * numFeatures
-                val x_center_raw = output[baseIndex]
-                val y_center_raw = output[baseIndex + 1]
-                val width_raw = output[baseIndex + 2]
-                val height_raw = output[baseIndex + 3]
-                val objectness = output[baseIndex + 4]
-                
-                Log.d("InferenceEngine", "樣本 $i: 正規化座標=($x_center_raw, $y_center_raw, $width_raw, $height_raw), objectness=$objectness")
-                
-                // 檢查前幾個類別分數，特別關注交通燈 (class 9)
-                var maxClassScore = 0f
-                var bestClassId = 0
-                val trafficLightScore = if (numFeatures > 14) output[baseIndex + 5 + 9] else 0f // class 9 = traffic light
-                
-                for (c in 0 until minOf(10, numFeatures - 5)) {
-                    val classScore = output[baseIndex + 5 + c]
-                    if (classScore > maxClassScore) {
-                        maxClassScore = classScore
-                        bestClassId = c
-                    }
-                }
-                Log.d("InferenceEngine", "樣本 $i: 最高類別 $bestClassId (${DetectionResult.getClassLabel(bestClassId)}): $maxClassScore")
-                Log.d("InferenceEngine", "樣本 $i: 交通燈分數 (class 9): $trafficLightScore")
-            }
-            
-            // 正常處理所有檢測
-            for (i in 0 until numDetections) {
-                val baseIndex = i * numFeatures
-                
-                // YOLOv5 格式解析 - 輸出是正規化座標 (0-1)
-                val x_center_norm = output[baseIndex]
-                val y_center_norm = output[baseIndex + 1] 
-                val width_norm = output[baseIndex + 2]
-                val height_norm = output[baseIndex + 3]
-                
-                // 標準 YOLOv5s 輸出正規化座標 [0,1]
-                val x_center_pixels = x_center_norm * detectorInputSize
-                val y_center_pixels = y_center_norm * detectorInputSize
-                val width_pixels = width_norm * detectorInputSize
-                val height_pixels = height_norm * detectorInputSize
-                
-                // 縮放到原始圖片尺寸
-                val x_center = x_center_pixels * scaleX
-                val y_center = y_center_pixels * scaleY
-                val width = width_pixels * scaleX
-                val height = height_pixels * scaleY
-                val objectness = output[baseIndex + 4]
-                
-                // 只處理 objectness 分數夠高的檢測
-                if (objectness >= 0.05f) {
-                    // 找到最高分數的類別（從第5個特徵開始是類別分數）
-                    var maxClassScore = 0f
-                    var bestClassId = 0
-                    for (c in 0 until (numFeatures - 5)) {
-                        val classScore = output[baseIndex + 5 + c]
-                        if (classScore > maxClassScore) {
-                            maxClassScore = classScore
-                            bestClassId = c
-                        }
-                    }
-                    
-                    // YOLOv5 總信心度 = objectness * 最高類別分數
-                    val totalConfidence = objectness * maxClassScore
-                    
-                    // 使用合理的閾值
-                    val testThreshold = 0.1f
-                    if (totalConfidence >= testThreshold) {
-                        // 計算邊界框座標並確保合理範圍
-                        val x1 = kotlin.math.max(0f, x_center - width / 2)
-                        val y1 = kotlin.math.max(0f, y_center - height / 2)
-                        val x2 = kotlin.math.min(originalWidth.toFloat(), x_center + width / 2)
-                        val y2 = kotlin.math.min(originalHeight.toFloat(), y_center + height / 2)
-                        
-                        // 確保 x2 > x1 和 y2 > y1
-                        if (x2 > x1 && y2 > y1) {
-                            val label = DetectionResult.getClassLabel(bestClassId)
-                            detections.add(DetectionResult(
-                                RectF(x1, y1, x2, y2),
-                                totalConfidence,
-                                bestClassId,
-                                label
-                            ))
-                            
-                            Log.d("InferenceEngine", "檢測到物件: ${DetectionResult.getClassLabel(bestClassId)}, 信心度=$totalConfidence (obj=$objectness, cls=$maxClassScore)")
-                            Log.d("InferenceEngine", "正規化座標: center=($x_center_norm,$y_center_norm) size=($width_norm,$height_norm)")
-                            Log.d("InferenceEngine", "640px座標: center=($x_center_pixels,$y_center_pixels) size=($width_pixels,$height_pixels)")
-                            Log.d("InferenceEngine", "原始圖片座標: center=($x_center,$y_center) size=($width,$height)")
-                            Log.d("InferenceEngine", "最終 bbox: ($x1,$y1,$x2,$y2)")
-                        } else {
-                            Log.d("InferenceEngine", "跳過無效座標: center=($x_center,$y_center) size=($width,$height) -> bbox=($x1,$y1,$x2,$y2)")
-                        }
-                    }
-                }
-            }
-        } else {
-            Log.e("InferenceEngine", "未知的檢測器輸出格式")
-        }
-        
-        Log.d("InferenceEngine", "初步檢測到 ${detections.size} 個候選物件")
-        return applyNMS(detections)
-    }
-    
-    private fun parseClassifierOutput(outputTensor: OnnxTensor): ClassificationResult {
-        val probabilities = outputTensor.floatBuffer.array()
-        val maxIndex = probabilities.indices.maxByOrNull { probabilities[it] } ?: ClassificationResult.UNKNOWN
-        val confidence = probabilities[maxIndex]
-        
-        return ClassificationResult(maxIndex, confidence, probabilities)
-    }
-    
-    private fun parseYoloV5MultiScaleOutput(
-        output: FloatArray,
-        numAnchors: Int,
-        gridH: Int,
-        gridW: Int,
-        numFeatures: Int,
-        originalWidth: Int,
-        originalHeight: Int
-    ): List<DetectionResult> {
-        val detections = mutableListOf<DetectionResult>()
-        val numClasses = numFeatures - 5
 
-        val scaleX = originalWidth.toFloat() / detectorInputSize
-        val scaleY = originalHeight.toFloat() / detectorInputSize
+    private fun parseDrivingPlan(policyData: FloatArray): DrivingPlanResult {
+        if (policyData.size < PLAN_VALUES) return emptyPlanResult()
 
-        // Anchors for P3/8, P4/16, P5/32 strides
-        val anchors = arrayOf(
-            floatArrayOf(10f, 13f, 16f, 30f, 33f, 23f),      // P3/8 (80x80 grid)
-            floatArrayOf(30f, 61f, 62f, 45f, 59f, 119f),     // P4/16 (40x40 grid)
-            floatArrayOf(116f, 90f, 156f, 198f, 373f, 326f)  // P5/32 (20x20 grid)
+        val nearVelocity = policyData[PLAN_VELOCITY_X]
+        val futureVelocity = policyData[16 * PLAN_WIDTH + PLAN_VELOCITY_X]
+        val path = (0 until 33).map { i ->
+            PlanPoint(
+                x = policyData[i * PLAN_WIDTH],
+                y = policyData[i * PLAN_WIDTH + 1]
+            )
+        }.filter { it.x.isFinite() && it.y.isFinite() && it.x >= 0f }
+        val accelerationNow = policyData[PLAN_ACCELERATION_X]
+        val desiredAcceleration = getOpenpilotDesiredAcceleration(policyData, nearVelocity, accelerationNow)
+        val shouldStop = nearVelocity < STOPPING_VELOCITY_MPS && desiredAcceleration < 0.1f
+        val velocityDelta = futureVelocity - nearVelocity
+        val shouldGo = !shouldStop && nearVelocity < 1.5f &&
+            desiredAcceleration > GO_ACCELERATION_MPS2 && velocityDelta > GO_VELOCITY_DELTA_MPS
+        val action = when {
+            shouldStop -> DrivingAction.STOP
+            shouldGo -> DrivingAction.GO
+            else -> DrivingAction.HOLD
+        }
+        val confidence = when (action) {
+            DrivingAction.STOP -> ((0.1f - desiredAcceleration) / 1.6f).coerceIn(0.65f, 1f)
+            DrivingAction.GO -> ((desiredAcceleration - GO_ACCELERATION_MPS2) / 1.8f).coerceIn(0.65f, 1f)
+            DrivingAction.HOLD -> 0.2f
+        }
+
+        return DrivingPlanResult(
+            shouldStop,
+            shouldGo,
+            confidence,
+            nearVelocity,
+            futureVelocity,
+            desiredAcceleration,
+            action,
+            path,
+            CameraCalibrationEstimate(autoPitchDeg, autoYawDeg, autoHeightM, calibrationValid, calibrationSampleCount)
         )
+    }
 
-        // Determine stride and anchor set based on grid size
-        val (stride, anchorSet) = when(gridH) {
-            80 -> 8 to anchors[0]
-            40 -> 16 to anchors[1]
-            20 -> 32 to anchors[2]
-            else -> return emptyList() // Should not happen for YOLOv5
+    private fun emptyPlanResult(): DrivingPlanResult {
+        return DrivingPlanResult(
+            shouldStop = false,
+            shouldGo = false,
+            confidence = 0f,
+            nearVelocity = 0f,
+            futureVelocity = 0f,
+            desiredAcceleration = 0f,
+            action = DrivingAction.HOLD,
+            calibration = CameraCalibrationEstimate(autoPitchDeg, autoYawDeg, autoHeightM, calibrationValid, calibrationSampleCount)
+        )
+    }
+
+    private fun resetTemporalBuffers() {
+        for (frame in featureBuffer) frame.fill(0f)
+        previousFrame = null
+        previousBigFrame = null
+    }
+
+    private fun updateAutoCalibration(visionData: FloatArray): Boolean {
+        if (visionData.size <= VISION_HIDDEN_STATE_START) return false
+        val wasValid = calibrationValid
+
+        val poseTransX = visionData[VISION_POSE_START]
+        val poseStdX = safeExp(visionData[VISION_POSE_START + 6])
+        val roadHeight = kotlin.math.abs(visionData[VISION_ROAD_TRANSFORM_START + 2])
+        val roadHeightStd = safeExp(visionData[VISION_ROAD_TRANSFORM_START + 8])
+        val wideRoll = visionData[VISION_WIDE_FROM_DEVICE_EULER_START]
+        val widePitch = visionData[VISION_WIDE_FROM_DEVICE_EULER_START + 1]
+        val wideYaw = visionData[VISION_WIDE_FROM_DEVICE_EULER_START + 2]
+        val widePitchStd = safeExp(visionData[VISION_WIDE_FROM_DEVICE_EULER_START + 4])
+        val wideYawStd = safeExp(visionData[VISION_WIDE_FROM_DEVICE_EULER_START + 5])
+
+        val poseReliable = poseTransX.isFinite() && kotlin.math.abs(poseTransX) > 0.05f && poseStdX < 2.5f
+        val eulerReliable = poseReliable &&
+            wideRoll.isFinite() && widePitch.isFinite() && wideYaw.isFinite() &&
+            widePitchStd.isFinite() && wideYawStd.isFinite() &&
+            widePitchStd < 0.20f && wideYawStd < 0.20f
+        val observedPitchDeg = if (eulerReliable) Math.toDegrees(widePitch.toDouble()).toFloat() else null
+        val observedYawDeg = if (eulerReliable) Math.toDegrees(wideYaw.toDouble()).toFloat() else null
+        val observedHeight = if (roadHeight.isFinite() && roadHeightStd.isFinite() && roadHeightStd < 0.60f && roadHeight in 0.7f..2.2f) {
+            roadHeight
+        } else null
+
+        var updated = false
+        observedPitchDeg?.let {
+            if (it in -12f..12f) {
+                autoPitchDeg = lowPass(autoPitchDeg, it, 0.015f)
+                updated = true
+            }
         }
+        observedYawDeg?.let {
+            if (it in -12f..12f) {
+                autoYawDeg = lowPass(autoYawDeg, it, 0.015f)
+                updated = true
+            }
+        }
+        observedHeight?.let {
+            autoHeightM = lowPass(autoHeightM, it, 0.01f)
+            updated = true
+        }
+        if (updated) calibrationSampleCount += 1
+        calibrationValid = calibrationSampleCount >= CALIBRATION_MIN_SAMPLES
+        val warpActivated = calibrationValid && !wasValid && !warpWasActive
+        if (calibrationValid) warpWasActive = true
+        return warpActivated
+    }
 
-        for (y in 0 until gridH) {
-            for (x in 0 until gridW) {
-                for (anchor in 0 until numAnchors) {
-                    val baseIndex = (y * gridW * numAnchors + x * numAnchors + anchor) * numFeatures
+    private fun safeExp(value: Float): Float {
+        return if (value.isFinite()) kotlin.math.exp(value.coerceAtMost(11f)) else Float.POSITIVE_INFINITY
+    }
 
-                    if (baseIndex + numFeatures > output.size) continue
+    private fun lowPass(previous: Float, observed: Float, alpha: Float): Float {
+        return previous + (observed - previous) * alpha
+    }
 
-                    val objectness = sigmoid(output[baseIndex + 4])
+    private fun getOpenpilotDesiredAcceleration(policyData: FloatArray, vNow: Float, aNow: Float): Float {
+        val stableTargetVelocity = interpolatePlanVelocity(policyData, MIN_STABLE_DELAY_S)
+        val vTarget = vNow + (MODEL_ACTION_T_S / MIN_STABLE_DELAY_S) * (stableTargetVelocity - vNow)
+        return 2f * (vTarget - vNow) / MODEL_ACTION_T_S - aNow
+    }
 
-                    if (objectness >= CONFIDENCE_THRESHOLD) {
-                        var maxClassScore = 0f
-                        var bestClassId = -1
-                        for (c in 0 until numClasses) {
-                            val classScore = sigmoid(output[baseIndex + 5 + c])
-                            if (classScore > maxClassScore) {
-                                maxClassScore = classScore
-                                bestClassId = c
-                            }
-                        }
+    private fun interpolatePlanVelocity(policyData: FloatArray, targetTimeS: Float): Float {
+        var previousTime = 0f
+        var previousVelocity = policyData[PLAN_VELOCITY_X]
+        for (i in 1 until 33) {
+            val time = modelTimeIndex(i)
+            val velocity = policyData[i * PLAN_WIDTH + PLAN_VELOCITY_X]
+            if (targetTimeS <= time) {
+                val ratio = ((targetTimeS - previousTime) / (time - previousTime)).coerceIn(0f, 1f)
+                return previousVelocity + (velocity - previousVelocity) * ratio
+            }
+            previousTime = time
+            previousVelocity = velocity
+        }
+        return previousVelocity
+    }
 
-                        val totalConfidence = objectness * maxClassScore
-                        if (totalConfidence >= CONFIDENCE_THRESHOLD) {
-                            val rawX = output[baseIndex]
-                            val rawY = output[baseIndex + 1]
-                            val rawW = output[baseIndex + 2]
-                            val rawH = output[baseIndex + 3]
+    private fun modelTimeIndex(index: Int): Float {
+        val normalized = index / 32f
+        return 10f * normalized * normalized
+    }
 
-                            // Decode coordinates
-                            val centerX = (sigmoid(rawX) * 2 - 0.5f + x) * stride
-                            val centerY = (sigmoid(rawY) * 2 - 0.5f + y) * stride
-                            val width = (sigmoid(rawW) * 2).let { it * it } * anchorSet[anchor * 2]
-                            val height = (sigmoid(rawH) * 2).let { it * it } * anchorSet[anchor * 2 + 1]
+    private fun shiftFeatureBuffer(hiddenState: FloatArray) {
+        for (i in 0 until POLICY_FRAMES - 1) {
+            System.arraycopy(featureBuffer[i + 1], 0, featureBuffer[i], 0, FEATURE_LEN)
+        }
+        System.arraycopy(hiddenState, 0, featureBuffer[POLICY_FRAMES - 1], 0, FEATURE_LEN)
+    }
 
-                            // Scale to original image dimensions
-                            val scaledCenterX = centerX * scaleX
-                            val scaledCenterY = centerY * scaleY
-                            val scaledWidth = width * scaleX
-                            val scaledHeight = height * scaleY
+    private fun createFeaturesTensor(env: OrtEnvironment): OnnxTensor {
+        val buffer = FloatBuffer.allocate(POLICY_FRAMES * FEATURE_LEN)
+        for (frame in featureBuffer) {
+            for (value in frame) buffer.put(value)
+        }
+        buffer.rewind()
+        return OnnxTensor.createTensor(env, buffer, longArrayOf(1, POLICY_FRAMES.toLong(), FEATURE_LEN.toLong()))
+    }
 
-                            val x1 = kotlin.math.max(0f, scaledCenterX - scaledWidth / 2)
-                            val y1 = kotlin.math.max(0f, scaledCenterY - scaledHeight / 2)
-                            val x2 = kotlin.math.min(originalWidth.toFloat(), scaledCenterX + scaledWidth / 2)
-                            val y2 = kotlin.math.min(originalHeight.toFloat(), scaledCenterY + scaledHeight / 2)
+    private fun createTrafficConventionTensor(env: OrtEnvironment): OnnxTensor {
+        val buffer = FloatBuffer.allocate(2)
+        buffer.put(1f)
+        buffer.put(0f)
+        buffer.rewind()
+        return OnnxTensor.createTensor(env, buffer, longArrayOf(1, 2))
+    }
 
-                            if (x2 > x1 && y2 > y1) {
-                                detections.add(DetectionResult(
-                                    RectF(x1, y1, x2, y2),
-                                    totalConfidence,
-                                    bestClassId,
-                                    DetectionResult.getClassLabel(bestClassId)
-                                ))
-                            }
-                        }
+    private fun createZeroHalfTensor(env: OrtEnvironment, shape: LongArray): OnnxTensor {
+        val elements = shape.fold(1L) { acc, item -> acc * item }.toInt()
+        val buffer = FloatBuffer.allocate(elements)
+        repeat(elements) { buffer.put(0f) }
+        buffer.rewind()
+        return OnnxTensor.createTensor(env, buffer, shape)
+    }
+
+    private fun readFloatOutput(tensor: OnnxTensor): FloatArray {
+        val buffer: FloatBuffer = tensor.floatBuffer
+        buffer.rewind()
+        val data = FloatArray(buffer.remaining())
+        buffer.get(data)
+        return data
+    }
+
+    private fun packOpenpilotFrame(bitmap: Bitmap, bigModelFrame: Boolean): ByteArray {
+        val scaled = warpBitmapToModelFrame(bitmap, bigModelFrame)
+        val pixels = IntArray(modelWidth * modelHeight)
+        scaled.getPixels(pixels, 0, modelWidth, 0, 0, modelWidth, modelHeight)
+        scaled.recycle()
+
+        val yPlane = IntArray(modelWidth * modelHeight)
+        val uPlane = IntArray((modelWidth / 2) * (modelHeight / 2))
+        val vPlane = IntArray((modelWidth / 2) * (modelHeight / 2))
+        val packed = ByteArray(packedFrameSize)
+
+        for (blockY in 0 until modelHeight step 2) {
+            for (blockX in 0 until modelWidth step 2) {
+                var uSum = 0
+                var vSum = 0
+                for (dy in 0..1) {
+                    for (dx in 0..1) {
+                        val x = blockX + dx
+                        val y = blockY + dy
+                        val pixel = pixels[y * modelWidth + x]
+                        val r = (pixel shr 16) and 0xFF
+                        val g = (pixel shr 8) and 0xFF
+                        val b = pixel and 0xFF
+                        val yy = (0.299f * r + 0.587f * g + 0.114f * b).toInt().coerceIn(0, 255)
+                        val uu = (-0.169f * r - 0.331f * g + 0.5f * b + 128f).toInt().coerceIn(0, 255)
+                        val vv = (0.5f * r - 0.419f * g - 0.081f * b + 128f).toInt().coerceIn(0, 255)
+                        yPlane[y * modelWidth + x] = yy
+                        uSum += uu
+                        vSum += vv
                     }
                 }
+                val uvIndex = (blockY / 2) * (modelWidth / 2) + (blockX / 2)
+                uPlane[uvIndex] = uSum / 4
+                vPlane[uvIndex] = vSum / 4
             }
         }
-        return detections // NMS is applied outside this function
-    }
-    
-    private fun sigmoid(x: Float): Float {
-        return 1f / (1f + kotlin.math.exp(-x))
-    }
 
-    private fun applyNMS(detections: List<DetectionResult>): List<DetectionResult> {
-        if (detections.isEmpty()) return emptyList()
-        
-        val sortedDetections = detections.sortedByDescending { it.confidence }
-        val selectedDetections = mutableListOf<DetectionResult>()
-        
-        for (detection in sortedDetections) {
-            var shouldSelect = true
-            for (selected in selectedDetections) {
-                if (calculateIoU(detection.bbox, selected.bbox) > IOU_THRESHOLD) {
-                    shouldSelect = false
-                    break
-                }
-            }
-            if (shouldSelect) {
-                selectedDetections.add(detection)
+        val halfW = modelWidth / 2
+        val halfH = modelHeight / 2
+        for (y in 0 until halfH) {
+            for (x in 0 until halfW) {
+                val base = y * halfW + x
+                // Match openpilot frames_to_tensor: Y top-left, bottom-left, top-right, bottom-right, then U, V.
+                packed[base] = yPlane[(y * 2) * modelWidth + x * 2].toByte()
+                packed[halfW * halfH + base] = yPlane[(y * 2 + 1) * modelWidth + x * 2].toByte()
+                packed[2 * halfW * halfH + base] = yPlane[(y * 2) * modelWidth + x * 2 + 1].toByte()
+                packed[3 * halfW * halfH + base] = yPlane[(y * 2 + 1) * modelWidth + x * 2 + 1].toByte()
+                packed[4 * halfW * halfH + base] = uPlane[base].toByte()
+                packed[5 * halfW * halfH + base] = vPlane[base].toByte()
             }
         }
-        
-        return selectedDetections
-    }
-    
-    private fun calculateIoU(box1: RectF, box2: RectF): Float {
-        val intersectionArea = maxOf(0f, minOf(box1.right, box2.right) - maxOf(box1.left, box2.left)) *
-                maxOf(0f, minOf(box1.bottom, box2.bottom) - maxOf(box1.top, box2.top))
-        
-        val box1Area = (box1.right - box1.left) * (box1.bottom - box1.top)
-        val box2Area = (box2.right - box2.left) * (box2.bottom - box2.top)
-        val unionArea = box1Area + box2Area - intersectionArea
-        
-        return if (unionArea > 0) intersectionArea / unionArea else 0f
-    }
-    
-    private fun resizeBitmapWithPadding(bitmap: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
-        val scale = minOf(targetWidth.toFloat() / bitmap.width, targetHeight.toFloat() / bitmap.height)
-        val scaledWidth = (bitmap.width * scale).toInt()
-        val scaledHeight = (bitmap.height * scale).toInt()
-        
-        // 創建目標尺寸的黑色背景
-        val paddedBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(paddedBitmap)
-        canvas.drawColor(android.graphics.Color.BLACK)
-        
-        // 縮放原圖並居中放置
-        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, scaledWidth, scaledHeight, false)
-        val x = (targetWidth - scaledWidth) / 2
-        val y = (targetHeight - scaledHeight) / 2
-        canvas.drawBitmap(scaledBitmap, x.toFloat(), y.toFloat(), null)
-        
-        scaledBitmap.recycle()
-        
-        Log.d("InferenceEngine", "縮放: ${bitmap.width}x${bitmap.height} -> ${scaledWidth}x${scaledHeight}, 填充到 ${targetWidth}x${targetHeight}")
-        return paddedBitmap
+
+        return packed
     }
 
-    private fun cropRoi(bitmap: Bitmap, roi: RectF): Bitmap {
-        val x = maxOf(0, roi.left.toInt())
-        val y = maxOf(0, roi.top.toInt())
-        val width = minOf(bitmap.width - x, roi.width().toInt())
-        val height = minOf(bitmap.height - y, roi.height().toInt())
-        
-        return if (width > 0 && height > 0) {
-            Bitmap.createBitmap(bitmap, x, y, width, height)
+    private fun warpBitmapToModelFrame(bitmap: Bitmap, bigModelFrame: Boolean): Bitmap {
+        if (!calibrationValid) return centerCropScale(bitmap, modelWidth, modelHeight)
+
+        val sourceFromModel = sourceFromModelFrameMatrix(bitmap.width.toFloat(), bitmap.height.toFloat(), bigModelFrame)
+        val modelFromSource = invert3x3(sourceFromModel) ?: return centerCropScale(bitmap, modelWidth, modelHeight)
+        val warped = Bitmap.createBitmap(modelWidth, modelHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(warped)
+        canvas.drawColor(Color.BLACK)
+        val matrix = Matrix().apply {
+            setValues(floatArrayOf(
+                modelFromSource[0][0], modelFromSource[0][1], modelFromSource[0][2],
+                modelFromSource[1][0], modelFromSource[1][1], modelFromSource[1][2],
+                modelFromSource[2][0], modelFromSource[2][1], modelFromSource[2][2]
+            ))
+        }
+        canvas.drawBitmap(bitmap, matrix, null)
+        return warped
+    }
+
+    private fun sourceFromModelFrameMatrix(sourceWidth: Float, sourceHeight: Float, bigModelFrame: Boolean): Array<FloatArray> {
+        val sourceFl = sourceWidth / (2f * kotlin.math.tan(Math.toRadians((SOURCE_CAMERA_FOV_DEG / 2f).toDouble())).toFloat())
+        val sourceIntrinsics = arrayOf(
+            floatArrayOf(sourceFl, 0f, sourceWidth / 2f),
+            floatArrayOf(0f, sourceFl, sourceHeight / 2f),
+            floatArrayOf(0f, 0f, 1f)
+        )
+        val viewFromDevice = arrayOf(
+            floatArrayOf(0f, 1f, 0f),
+            floatArrayOf(0f, 0f, 1f),
+            floatArrayOf(1f, 0f, 0f)
+        )
+        val deviceFromCalib = rotationFromEuler(
+            roll = 0f,
+            pitch = Math.toRadians(autoPitchDeg.toDouble()).toFloat(),
+            yaw = Math.toRadians(autoYawDeg.toDouble()).toFloat()
+        )
+        val cameraFromCalib = multiply3x3(multiply3x3(sourceIntrinsics, viewFromDevice), deviceFromCalib)
+        return multiply3x3(cameraFromCalib, calibFromModelFrame(bigModelFrame))
+    }
+
+    private fun calibFromModelFrame(bigModelFrame: Boolean): Array<FloatArray> {
+        val modelFl = if (bigModelFrame) SBIGMODEL_FL else MEDMODEL_FL
+        val modelCx = if (bigModelFrame) SBIGMODEL_CX else MEDMODEL_CX
+        val modelCy = if (bigModelFrame) SBIGMODEL_CY else MEDMODEL_CY
+        val medIntrinsics = arrayOf(
+            floatArrayOf(modelFl, 0f, modelCx),
+            floatArrayOf(0f, modelFl, modelCy),
+            floatArrayOf(0f, 0f, 1f)
+        )
+        val viewFromDevice = arrayOf(
+            floatArrayOf(0f, 1f, 0f),
+            floatArrayOf(0f, 0f, 1f),
+            floatArrayOf(1f, 0f, 0f)
+        )
+        return invert3x3(multiply3x3(medIntrinsics, viewFromDevice)) ?: identity3x3()
+    }
+
+    private fun rotationFromEuler(roll: Float, pitch: Float, yaw: Float): Array<FloatArray> {
+        val cr = kotlin.math.cos(roll)
+        val sr = kotlin.math.sin(roll)
+        val cp = kotlin.math.cos(pitch)
+        val sp = kotlin.math.sin(pitch)
+        val cy = kotlin.math.cos(yaw)
+        val sy = kotlin.math.sin(yaw)
+        val rollMatrix = arrayOf(
+            floatArrayOf(1f, 0f, 0f),
+            floatArrayOf(0f, cr, -sr),
+            floatArrayOf(0f, sr, cr)
+        )
+        val pitchMatrix = arrayOf(
+            floatArrayOf(cp, 0f, sp),
+            floatArrayOf(0f, 1f, 0f),
+            floatArrayOf(-sp, 0f, cp)
+        )
+        val yawMatrix = arrayOf(
+            floatArrayOf(cy, -sy, 0f),
+            floatArrayOf(sy, cy, 0f),
+            floatArrayOf(0f, 0f, 1f)
+        )
+        return multiply3x3(yawMatrix, multiply3x3(pitchMatrix, rollMatrix))
+    }
+
+    private fun multiply3x3(a: Array<FloatArray>, b: Array<FloatArray>): Array<FloatArray> {
+        val result = Array(3) { FloatArray(3) }
+        for (row in 0..2) {
+            for (col in 0..2) {
+                result[row][col] = a[row][0] * b[0][col] + a[row][1] * b[1][col] + a[row][2] * b[2][col]
+            }
+        }
+        return result
+    }
+
+    private fun invert3x3(m: Array<FloatArray>): Array<FloatArray>? {
+        val det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+            m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+            m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        if (!det.isFinite() || kotlin.math.abs(det) < 1e-6f) return null
+        val invDet = 1f / det
+        return arrayOf(
+            floatArrayOf(
+                (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * invDet,
+                (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * invDet,
+                (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * invDet
+            ),
+            floatArrayOf(
+                (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * invDet,
+                (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * invDet,
+                (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * invDet
+            ),
+            floatArrayOf(
+                (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * invDet,
+                (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * invDet,
+                (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * invDet
+            )
+        )
+    }
+
+    private fun identity3x3(): Array<FloatArray> {
+        return arrayOf(
+            floatArrayOf(1f, 0f, 0f),
+            floatArrayOf(0f, 1f, 0f),
+            floatArrayOf(0f, 0f, 1f)
+        )
+    }
+
+    private fun centerCropScale(bitmap: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
+        val sourceRatio = bitmap.width.toFloat() / bitmap.height
+        val targetRatio = targetWidth.toFloat() / targetHeight
+        val cropWidth: Int
+        val cropHeight: Int
+        if (sourceRatio > targetRatio) {
+            cropHeight = bitmap.height
+            cropWidth = (cropHeight * targetRatio).toInt()
         } else {
-            Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+            cropWidth = bitmap.width
+            cropHeight = (cropWidth / targetRatio).toInt()
         }
+        val cropX = ((bitmap.width - cropWidth) / 2).coerceAtLeast(0)
+        val cropY = ((bitmap.height - cropHeight) / 2).coerceAtLeast(0)
+        val cropped = Bitmap.createBitmap(bitmap, cropX, cropY, cropWidth, cropHeight)
+        val scaled = Bitmap.createScaledBitmap(cropped, targetWidth, targetHeight, false)
+        cropped.recycle()
+        return scaled
     }
-    
+
     fun release() {
-        detectorSession?.close()
-        classifierSession?.close()
+        visionSession?.close()
+        policySession?.close()
         ortEnvironment?.close()
     }
 }

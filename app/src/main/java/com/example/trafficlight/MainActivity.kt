@@ -2,9 +2,13 @@ package com.example.trafficlight
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Bundle
-import android.speech.tts.TextToSpeech
 import android.util.Log
+import android.widget.Button
+import android.view.View
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -29,24 +33,52 @@ import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var previewView: PreviewView
     private lateinit var overlayView: OverlayView
     private lateinit var statusText: TextView
     private lateinit var fpsText: TextView
     private lateinit var debugText: TextView
+    private lateinit var controlPanel: View
+    private lateinit var soundPanel: View
+    private lateinit var statusPanel: View
+    private lateinit var zoomOutButton: Button
+    private lateinit var zoomInButton: Button
+    private lateinit var routeUpButton: Button
+    private lateinit var routeDownButton: Button
+    private lateinit var routeNarrowButton: Button
+    private lateinit var routeWideButton: Button
+    private lateinit var pitchUpButton: Button
+    private lateinit var pitchDownButton: Button
+    private lateinit var fovWideButton: Button
+    private lateinit var fovNarrowButton: Button
+    private lateinit var cameraHeightUpButton: Button
+    private lateinit var cameraHeightDownButton: Button
+    private lateinit var cameraLeftButton: Button
+    private lateinit var cameraRightButton: Button
+    private lateinit var calibrationResetButton: Button
+    private lateinit var frameThinButton: Button
+    private lateinit var frameThickButton: Button
+    private lateinit var stopSoundSwitch: Switch
+    private lateinit var goSoundSwitch: Switch
     
     private lateinit var inferenceEngine: InferenceEngine
     private lateinit var stateMachine: StateMachine
     private lateinit var roiSelector: RoiSelector
     private lateinit var frameAnalyzer: FrameAnalyzer
     
-    private var textToSpeech: TextToSpeech? = null
-    private var isTtsReady = false
+    private var toneGenerator: ToneGenerator? = null
+    private var stopSoundEnabled = true
+    private var goSoundEnabled = true
     
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
+    private var cameraControl: CameraControl? = null
+    private var cameraInfo: CameraInfo? = null
+    private var currentZoomRatio = 1.4f
+    private var minZoomRatio = 1f
+    private var maxZoomRatio = 1f
     private lateinit var cameraExecutor: ExecutorService
 
     private val requestPermissionLauncher = registerForActivityResult(
@@ -66,12 +98,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        cameraExecutor = Executors.newSingleThreadExecutor()
         
         initViews()
         initComponents()
         checkPermissions()
-        
-        cameraExecutor = Executors.newSingleThreadExecutor()
     }
 
     private fun initViews() {
@@ -80,6 +111,72 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         statusText = findViewById(R.id.statusText)
         fpsText = findViewById(R.id.fpsText)
         debugText = findViewById(R.id.debugText)
+        controlPanel = findViewById(R.id.controlPanel)
+        soundPanel = findViewById(R.id.soundPanel)
+        statusPanel = findViewById(R.id.statusPanel)
+        zoomOutButton = findViewById(R.id.zoomOutButton)
+        zoomInButton = findViewById(R.id.zoomInButton)
+        routeUpButton = findViewById(R.id.routeUpButton)
+        routeDownButton = findViewById(R.id.routeDownButton)
+        routeNarrowButton = findViewById(R.id.routeNarrowButton)
+        routeWideButton = findViewById(R.id.routeWideButton)
+        pitchUpButton = findViewById(R.id.pitchUpButton)
+        pitchDownButton = findViewById(R.id.pitchDownButton)
+        fovWideButton = findViewById(R.id.fovWideButton)
+        fovNarrowButton = findViewById(R.id.fovNarrowButton)
+        cameraHeightUpButton = findViewById(R.id.cameraHeightUpButton)
+        cameraHeightDownButton = findViewById(R.id.cameraHeightDownButton)
+        cameraLeftButton = findViewById(R.id.cameraLeftButton)
+        cameraRightButton = findViewById(R.id.cameraRightButton)
+        calibrationResetButton = findViewById(R.id.calibrationResetButton)
+        frameThinButton = findViewById(R.id.frameThinButton)
+        frameThickButton = findViewById(R.id.frameThickButton)
+        stopSoundSwitch = findViewById(R.id.stopSoundSwitch)
+        goSoundSwitch = findViewById(R.id.goSoundSwitch)
+
+        setupControlButtons()
+        previewView.setOnClickListener { toggleControls() }
+        overlayView.setOnClickListener { toggleControls() }
+    }
+
+    private fun toggleControls() {
+        val nextVisibility = if (controlPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        controlPanel.visibility = nextVisibility
+        soundPanel.visibility = nextVisibility
+    }
+
+    private fun setupControlButtons() {
+        zoomOutButton.setOnClickListener { adjustZoom(-0.2f) }
+        zoomInButton.setOnClickListener { adjustZoom(0.2f) }
+        routeUpButton.setOnClickListener { overlayView.adjustRouteVertical(-0.025f) }
+        routeDownButton.setOnClickListener { overlayView.adjustRouteVertical(0.025f) }
+        routeNarrowButton.setOnClickListener { overlayView.adjustRouteWidth(-0.08f) }
+        routeWideButton.setOnClickListener { overlayView.adjustRouteWidth(0.08f) }
+        pitchUpButton.setOnClickListener { overlayView.adjustCameraPitch(0.5f) }
+        pitchDownButton.setOnClickListener { overlayView.adjustCameraPitch(-0.5f) }
+        fovWideButton.setOnClickListener { overlayView.adjustCameraFov(2f) }
+        fovNarrowButton.setOnClickListener { overlayView.adjustCameraFov(-2f) }
+        cameraHeightUpButton.setOnClickListener { overlayView.adjustCameraHeight(0.05f) }
+        cameraHeightDownButton.setOnClickListener { overlayView.adjustCameraHeight(-0.05f) }
+        cameraLeftButton.setOnClickListener { overlayView.adjustCameraLateralOffset(-0.02f) }
+        cameraRightButton.setOnClickListener { overlayView.adjustCameraLateralOffset(0.02f) }
+        calibrationResetButton.setOnClickListener { overlayView.resetCameraCalibration() }
+        frameThinButton.setOnClickListener { overlayView.adjustStatusFrameWidth(-4f) }
+        frameThickButton.setOnClickListener { overlayView.adjustStatusFrameWidth(4f) }
+
+        val prefs = getSharedPreferences("sound_settings", MODE_PRIVATE)
+        stopSoundEnabled = prefs.getBoolean("stopSoundEnabled", true)
+        goSoundEnabled = prefs.getBoolean("goSoundEnabled", true)
+        stopSoundSwitch.isChecked = stopSoundEnabled
+        goSoundSwitch.isChecked = goSoundEnabled
+        stopSoundSwitch.setOnCheckedChangeListener { _, isChecked ->
+            stopSoundEnabled = isChecked
+            prefs.edit().putBoolean("stopSoundEnabled", isChecked).apply()
+        }
+        goSoundSwitch.setOnCheckedChangeListener { _, isChecked ->
+            goSoundEnabled = isChecked
+            prefs.edit().putBoolean("goSoundEnabled", isChecked).apply()
+        }
     }
     
     private fun updateDebugText(message: String) {
@@ -108,7 +205,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             frameAnalyzer.setViewDimensions(overlayView.width, overlayView.height)
         }
         
-        textToSpeech = TextToSpeech(this, this)
+        toneGenerator = ToneGenerator(AudioManager.STREAM_MUSIC, 90)
         
         setupStateObservers()
     }
@@ -205,15 +302,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun setupZoomControl(camera: Camera) {
-        val cameraInfo = camera.cameraInfo
-        val cameraControl = camera.cameraControl
+        cameraInfo = camera.cameraInfo
+        cameraControl = camera.cameraControl
         
         lifecycleScope.launch {
             try {
-                val hasZoom = cameraInfo.zoomState.value?.maxZoomRatio ?: 1f > 1f
+                val zoomState = cameraInfo?.zoomState?.value
+                minZoomRatio = zoomState?.minZoomRatio ?: 1f
+                maxZoomRatio = zoomState?.maxZoomRatio ?: 1f
+                val hasZoom = maxZoomRatio > minZoomRatio
                 if (hasZoom) {
-                    cameraControl.setZoomRatio(2.0f)
-                    Log.d("MainActivity", "Zoom set to 2x for better traffic light detection")
+                    currentZoomRatio = currentZoomRatio.coerceIn(minZoomRatio, maxZoomRatio)
+                    cameraControl?.setZoomRatio(currentZoomRatio)
+                    Log.d("MainActivity", "Zoom set to ${currentZoomRatio}x")
                 }
             } catch (e: Exception) {
                 Log.w("MainActivity", "Failed to set zoom", e)
@@ -221,47 +322,49 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    private fun adjustZoom(delta: Float) {
+        val control = cameraControl ?: return
+        if (maxZoomRatio <= minZoomRatio) return
+        currentZoomRatio = (currentZoomRatio + delta).coerceIn(minZoomRatio, maxZoomRatio)
+        control.setZoomRatio(currentZoomRatio)
+        Toast.makeText(this, "Zoom ${String.format("%.1f", currentZoomRatio)}x", Toast.LENGTH_SHORT).show()
+    }
+
     private fun onAnalysisResult(result: FrameAnalyzer.AnalysisResult) {
         runOnUiThread {
-            statusText.text = "${result.currentState} (${(result.confidence * 100).toInt()}%)"
+            statusText.text = result.currentState
             fpsText.text = "FPS: ${result.fps}"
             
             // 更新所有檢測結果到 overlay
-            overlayView.setResults(result.detections, result.imageWidth, result.imageHeight, result.imageRotation)
+            overlayView.setResults(
+                result.detections,
+                result.imageWidth,
+                result.imageHeight,
+                result.imageRotation,
+                result.pathPoints,
+                result.shouldStop,
+                result.shouldGo,
+                result.cameraCalibration
+            )
             
-            Log.d("Analysis", "${result.debugInfo}")
         }
     }
 
     private fun announceState(state: TrafficLightState) {
-        if (!isTtsReady) return
-        
-        val announcement = when (state) {
-            TrafficLightState.RED -> "紅燈"
-            TrafficLightState.GREEN -> "綠燈" 
-            TrafficLightState.YELLOW -> "黃燈"
+        when (state) {
+            TrafficLightState.RED -> if (stopSoundEnabled) playStopTone()
+            TrafficLightState.GREEN -> if (goSoundEnabled) playGoTone()
             else -> return
         }
-        
-        textToSpeech?.speak(
-            announcement,
-            TextToSpeech.QUEUE_FLUSH,
-            null,
-            "traffic_light_$state"
-        )
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = textToSpeech?.setLanguage(Locale.TRADITIONAL_CHINESE)
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                textToSpeech?.setLanguage(Locale.CHINESE)
-            }
-            isTtsReady = true
-            Log.d("MainActivity", "TTS initialized successfully")
-        } else {
-            Log.e("MainActivity", "TTS initialization failed")
-        }
+    private fun playStopTone() {
+        toneGenerator?.startTone(ToneGenerator.TONE_PROP_NACK, 130)
+        previewView.postDelayed({ toneGenerator?.startTone(ToneGenerator.TONE_PROP_NACK, 130) }, 180)
+    }
+
+    private fun playGoTone() {
+        toneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 180)
     }
 
     override fun onResume() {
@@ -277,8 +380,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         super.onDestroy()
         
-        textToSpeech?.stop()
-        textToSpeech?.shutdown()
+        toneGenerator?.release()
         
         inferenceEngine.release()
         cameraExecutor.shutdown()

@@ -15,12 +15,203 @@
         android:layout_height="match_parent" />
 
     <LinearLayout
+        android:id="@+id/controlPanel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginTop="18dp"
+        android:layout_marginStart="12dp"
+        android:background="#55000000"
+        android:orientation="vertical"
+        android:padding="6dp"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/routeUpButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="線上"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/routeDownButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="線下"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/routeNarrowButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="52dp"
+            android:text="窄"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/routeWideButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="52dp"
+            android:text="寬"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/pitchUpButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="俯仰+"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/pitchDownButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="俯仰-"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/fovWideButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="FOV+"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/fovNarrowButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="FOV-"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/cameraHeightUpButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="高度+"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/cameraHeightDownButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="高度-"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/cameraLeftButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="左移"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/cameraRightButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="右移"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/calibrationResetButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="校正重設"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/frameThinButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="框細"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/frameThickButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="58dp"
+            android:text="框粗"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/soundPanel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="18dp"
+        android:layout_marginEnd="12dp"
+        android:background="#55000000"
+        android:orientation="vertical"
+        android:padding="6dp"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/zoomOutButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="52dp"
+            android:text="Z-"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/zoomInButton"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:minWidth="52dp"
+            android:text="Z+"
+            android:textSize="12sp" />
+
+        <Switch
+            android:id="@+id/stopSoundSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:text="停車音"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+
+        <Switch
+            android:id="@+id/goSoundSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:text="起步音"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/statusPanel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:background="#80000000"
+        android:background="#33000000"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:padding="20dp"
+        android:visibility="gone">
 
         <TextView
             android:id="@+id/debugText"
@@ -31,7 +222,8 @@
             android:textSize="12sp"
             android:fontFamily="monospace"
             android:maxLines="4"
-            android:scrollHorizontally="true" />
+            android:scrollHorizontally="true"
+            android:visibility="gone" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -46,7 +238,8 @@
                 android:layout_weight="1"
                 android:text="等待檢測..."
                 android:textColor="#FFFFFF"
-                android:textSize="16sp" />
+                android:textStyle="bold"
+                android:textSize="36sp" />
 
             <TextView
                 android:id="@+id/fpsText"

@@ -95,8 +95,15 @@ class StateMachine {
     private fun updateState(newState: TrafficLightState) {
         val currentTime = System.currentTimeMillis()
         val currentStateValue = _currentState.value
+
+        if (newState == TrafficLightState.UNKNOWN) {
+            if (currentStateValue != TrafficLightState.UNKNOWN) {
+                _currentState.value = TrafficLightState.UNKNOWN
+            }
+            return
+        }
         
-        if (newState != currentStateValue && newState != TrafficLightState.UNKNOWN) {
+        if (newState != currentStateValue) {
             if (currentTime - lastStateChangeTime >= minStateChangeCooldown) {
                 _currentState.value = newState
                 lastStateChangeTime = currentTime
@@ -161,9 +168,9 @@ class StateMachine {
     
     fun getCurrentStateString(): String {
         return when (_currentState.value) {
-            TrafficLightState.RED -> "紅燈"
+            TrafficLightState.RED -> "停車"
             TrafficLightState.YELLOW -> "黃燈"
-            TrafficLightState.GREEN -> "綠燈"
+            TrafficLightState.GREEN -> "起步"
             TrafficLightState.OFF -> "燈號關閉"
             TrafficLightState.UNKNOWN -> "未知"
         }
