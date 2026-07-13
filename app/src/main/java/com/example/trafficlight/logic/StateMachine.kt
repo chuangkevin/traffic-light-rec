@@ -34,6 +34,12 @@ class StateMachine {
     private var lastAnnouncedState = TrafficLightState.UNKNOWN
     private var lastStateChangeTime = 0L
     private val minStateChangeCooldown = 2000L
+    private var mutedUntilMs = 0L
+
+    /** 暫停播報一段時間(方向切換等過渡期用),期間狀態照常更新但不出聲。 */
+    fun muteFor(durationMs: Long) {
+        mutedUntilMs = System.currentTimeMillis() + durationMs
+    }
     
     fun processClassification(result: ClassificationResult) {
         val state = when (result.classId) {
@@ -114,6 +120,7 @@ class StateMachine {
     }
     
     private fun checkShouldAnnounce(newState: TrafficLightState) {
+        if (System.currentTimeMillis() < mutedUntilMs) return
         val shouldAnnounceNow = when {
             newState == lastAnnouncedState -> false
             newState == TrafficLightState.UNKNOWN || newState == TrafficLightState.OFF -> false
