@@ -232,7 +232,7 @@ fi
 #   $2: xyz
 
 eval "set -- $(
-        printf '%s\n' "$@" |
+        printf '%s\n' "$DEFAULT_JVM_OPTS $JAVA_OPTS $GRADLE_OPTS" |
         xargs -n1 |
         sed ' s~[^-[:alnum:]+,./:=@_]~\\&~g; ' |
         tr '\n' ' '
