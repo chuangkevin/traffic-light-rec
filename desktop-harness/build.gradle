@@ -13,6 +13,10 @@ application {
     mainClass = 'com.example.trafficlight.harness.MainKt'
 }
 
+tasks.named('run') {
+    workingDir = rootDir
+}
+
 dependencies {
     implementation project(':core')
     implementation 'com.microsoft.onnxruntime:onnxruntime:1.19.2'

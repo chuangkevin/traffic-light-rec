@@ -29,10 +29,11 @@ fun rotateByDegrees(img: BufferedImage, rollDeg: Double): BufferedImage {
 }
 
 fun main(args: Array<String>) {
-    require(args.size >= 2) { "usage: <framesDir> <outDir> [rollDeg]" }
+    require(args.size >= 2) { "usage: <framesDir> <outDir> [rollDeg] [fovDeg]" }
     val framesDir = File(args[0])
     val outDir = File(args[1]).apply { mkdirs() }
     val rollDeg = if (args.size >= 3) args[2].toDouble() else 0.0
+    val fovDeg = if (args.size >= 4) args[3].toFloat() else 72f
     val annotatedDir = File(outDir, "annotated").apply { mkdirs() }
 
     val modelsDir = File("app/src/main/assets/models")
@@ -57,7 +58,7 @@ fun main(args: Array<String>) {
             timestampMs += 20
             pipeline.onImuTilt(Tilt(rollDeg.toFloat(), 0f), timestampMs)
         }
-        val result = pipeline.processFrame(bufferedToIntImage(input), rotationDegrees = 0, horizontalFovDeg = 72f)
+        val result = pipeline.processFrame(bufferedToIntImage(input), rotationDegrees = 0, horizontalFovDeg = fovDeg)
         val plan = result.plan
 
         events.append("$index,${plan.action},${"%.2f".format(plan.confidence)},")
