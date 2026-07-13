@@ -19,7 +19,9 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.trafficlight.analyzer.FrameAnalyzer
+import com.example.trafficlight.camera.horizontalFovDeg
 import com.example.trafficlight.inference.InferenceEngine
+import com.example.trafficlight.sensor.ImuManager
 import com.example.trafficlight.logic.RoiSelector
 import com.example.trafficlight.logic.StateMachine
 import com.example.trafficlight.logic.TrafficLightState
@@ -68,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var roiSelector: RoiSelector
     private lateinit var frameAnalyzer: FrameAnalyzer
     
+    private var imuManager: ImuManager? = null
     private var toneGenerator: ToneGenerator? = null
     private var stopSoundEnabled = true
     private var goSoundEnabled = true
@@ -192,12 +195,18 @@ class MainActivity : AppCompatActivity() {
         stateMachine = StateMachine()
         roiSelector = RoiSelector()
         
+        imuManager = ImuManager(this) { tilt, ts -> inferenceEngine.onImuTilt(tilt, ts) }
+
         frameAnalyzer = FrameAnalyzer(
             inferenceEngine = inferenceEngine,
             stateMachine = stateMachine,
             roiSelector = roiSelector,
             onResultCallback = ::onAnalysisResult,
-            onDebugCallback = ::updateDebugText
+            onDebugCallback = ::updateDebugText,
+            horizontalFovProvider = {
+                cameraInfo?.let { horizontalFovDeg(it, currentZoomRatio) } ?: 72f
+            },
+            onRotationChanged = { imuManager?.rotationDegrees = it }
         )
 
         // Pass view dimensions to analyzer once the view is laid out
@@ -367,14 +376,27 @@ class MainActivity : AppCompatActivity() {
         toneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 180)
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // configChanges 模式:旋轉不重建 Activity,自行換佈局並重綁 view
+        setContentView(R.layout.activity_main)
+        initViews()
+        overlayView.post {
+            frameAnalyzer.setViewDimensions(overlayView.width, overlayView.height)
+        }
+        cameraProvider?.let { bindCameraUseCases() }
+        // 切換後靜音 1 秒,避免時序緩衝重置期間亂報
+        stateMachine.muteFor(1000L)
+    }
+
     override fun onResume() {
         super.onResume()
-        if (::frameAnalyzer.isInitialized) {
-        }
+        imuManager?.start()
     }
 
     override fun onPause() {
         super.onPause()
+        imuManager?.stop()
     }
 
     override fun onDestroy() {

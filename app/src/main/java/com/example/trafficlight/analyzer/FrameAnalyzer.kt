@@ -24,7 +24,9 @@ class FrameAnalyzer(
     private val stateMachine: StateMachine,
     private val roiSelector: RoiSelector,
     private val onResultCallback: (AnalysisResult) -> Unit,
-    private val onDebugCallback: (String) -> Unit = {}
+    private val onDebugCallback: (String) -> Unit = {},
+    private val horizontalFovProvider: () -> Float = { 72f },
+    private val onRotationChanged: (Int) -> Unit = {}
 ) : ImageAnalysis.Analyzer {
 
     private var frameCounter = 0
@@ -93,12 +95,16 @@ class FrameAnalyzer(
                 originalBitmap.recycle()
 
                 val imageRotation = image.imageInfo.rotationDegrees
-                
+                onRotationChanged(imageRotation)
+
                 if (shouldRunDetection) {
-                    runDetection(bitmap, currentTime)
+                    runDetection(bitmap, imageRotation, currentTime)
                 }
-                
-                val result = createAnalysisResult(bitmap.width, bitmap.height, imageRotation)
+
+                // core pipeline 已把幀轉正,overlay 座標以轉正後的尺寸為基準
+                val uprightW = if (imageRotation == 90 || imageRotation == 270) bitmap.height else bitmap.width
+                val uprightH = if (imageRotation == 90 || imageRotation == 270) bitmap.width else bitmap.height
+                val result = createAnalysisResult(uprightW, uprightH, 0)
                 withContext(Dispatchers.Main) {
                     onResultCallback(result)
                 }
@@ -117,9 +123,9 @@ class FrameAnalyzer(
         }
     }
     
-    private suspend fun runDetection(bitmap: Bitmap, currentTime: Long) {
+    private suspend fun runDetection(bitmap: Bitmap, rotationDegrees: Int, currentTime: Long) {
         allDetections = emptyList()
-        val plan = inferenceEngine.analyzeDrivingPlan(bitmap)
+        val plan = inferenceEngine.analyzeDrivingPlan(bitmap, rotationDegrees, horizontalFovProvider())
         shouldStop = plan.shouldStop
         shouldGo = plan.shouldGo
         val classId = when (plan.action) {
