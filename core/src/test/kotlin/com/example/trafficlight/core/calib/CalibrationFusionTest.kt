@@ -48,8 +48,45 @@ class CalibrationFusionTest {
         assertFalse(anyReset)
     }
 
+    private fun plausibleVision(): FloatArray {
+        val vision = FloatArray(1600)
+        vision[87] = 5f
+        vision[87 + 6] = -3f
+        vision[99 + 1] = Math.toRadians(3.0).toFloat()
+        vision[99 + 4] = -3f
+        vision[99 + 5] = -3f
+        vision[105 + 2] = 1.4f
+        vision[105 + 8] = -3f
+        return vision
+    }
+
+    @Test fun stationaryPhoneDoesNotCalibrate() {
+        val f = CalibrationFusion()
+        // 未提供速度(=0)→ 即使模型輸出可信也不累積
+        repeat(25) { f.onModelOutputs(plausibleVision()) }
+        assertEquals(0, f.state().sampleCount)
+        assertFalse(f.state().valid)
+        assertFalse(f.state().movingFastEnough)
+    }
+
+    @Test fun slowSpeedDoesNotCalibrate() {
+        val f = CalibrationFusion()
+        f.onSpeed(15f / 3.6f) // 15 km/h < 20 門檻
+        repeat(25) { f.onModelOutputs(plausibleVision()) }
+        assertEquals(0, f.state().sampleCount)
+    }
+
+    @Test fun drivingSpeedEnablesCalibration() {
+        val f = CalibrationFusion()
+        f.onSpeed(30f / 3.6f) // 30 km/h
+        repeat(25) { f.onModelOutputs(plausibleVision()) }
+        assertTrue(f.state().valid)
+        assertTrue(f.state().movingFastEnough)
+    }
+
     @Test fun modelOutputsRefinePitchAndActivateWarp() {
         val f = CalibrationFusion()
+        f.onSpeed(10f) // 36 km/h,超過校正速度門檻
         // 合成 vision 輸出:pose x 平移可信、pitch/yaw std 小、height 合理
         val vision = FloatArray(1600)
         vision[87] = 5f          // poseTransX

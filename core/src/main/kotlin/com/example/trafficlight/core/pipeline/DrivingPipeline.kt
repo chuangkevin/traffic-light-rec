@@ -42,6 +42,9 @@ class DrivingPipeline(
 
     val bufferedFrameReady: Boolean get() = previousMed != null
 
+    /** GPS 車速(m/s),用於校正速度閘門。 */
+    fun onSpeed(mps: Float) = calibration.onSpeed(mps)
+
     fun onImuTilt(tilt: Tilt, timestampMs: Long): Boolean {
         val sudden = calibration.onImuTilt(tilt, timestampMs)
         if (sudden) resetTemporalBuffers()

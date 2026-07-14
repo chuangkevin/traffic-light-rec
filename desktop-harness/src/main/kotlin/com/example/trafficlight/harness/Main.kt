@@ -42,6 +42,7 @@ fun main(args: Array<String>) {
         File(modelsDir, "openpilot_driving_policy.onnx")
     )
     val pipeline = DrivingPipeline(runner)
+    pipeline.onSpeed(10f) // 模擬行駛中(36 km/h),讓校正速度閘門放行
 
     val frames = framesDir.listFiles { f -> f.extension.lowercase() in setOf("png", "jpg", "jpeg") }
         ?.sortedBy { it.name } ?: emptyList()

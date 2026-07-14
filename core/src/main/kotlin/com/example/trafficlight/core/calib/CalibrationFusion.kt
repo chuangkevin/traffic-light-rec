@@ -9,7 +9,9 @@ data class CalibrationState(
     val yawDeg: Float,
     val heightM: Float,
     val valid: Boolean,
-    val sampleCount: Int
+    val sampleCount: Int,
+    val speedMps: Float = 0f,
+    val movingFastEnough: Boolean = false
 )
 
 /**
@@ -24,6 +26,7 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
     private var imuInitialized = false
     private var lastImuTimestampMs = 0L
 
+    private var speedMps = 0f
     private var modelPitchDeg = initialPitchDeg
     private var modelYawDeg = 0f
     private var heightM = 1.35f
@@ -34,6 +37,9 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
 
     companion object {
         const val MIN_SAMPLES = 20
+        /** 模型自校正只在車速達此門檻時累積(靜止時模型 pose 輸出無意義) */
+        const val MIN_CALIB_SPEED_KMH = 20f
+        const val MIN_CALIB_SPEED_MPS = MIN_CALIB_SPEED_KMH / 3.6f
         private const val IMU_TAU_S = 0.5f            // 低通時間常數
         private const val SUDDEN_CHANGE_DEG = 6f       // 觀測值 vs 濾波值差異閾值
         private const val VISION_POSE_START = 87
@@ -67,8 +73,14 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
         return false
     }
 
+    /** GPS 車速(m/s)。低於門檻時模型自校正不累積。 */
+    fun onSpeed(mps: Float) {
+        speedMps = mps
+    }
+
     /** 移植自 InferenceEngine.updateAutoCalibration;回傳 true = warp 剛轉為啟用。 */
     fun onModelOutputs(visionData: FloatArray): Boolean {
+        if (speedMps < MIN_CALIB_SPEED_MPS) return false
         if (visionData.size <= VISION_ROAD_TRANSFORM_START + 8) return false
         val wasValid = valid
 
@@ -108,7 +120,8 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
     fun state(): CalibrationState {
         // pitch:模型校正 valid 前採 IMU,valid 後採模型細化值
         val pitch = if (valid) modelPitchDeg else imuPitchDeg
-        return CalibrationState(imuRollDeg, pitch, modelYawDeg, heightM, valid, sampleCount)
+        return CalibrationState(imuRollDeg, pitch, modelYawDeg, heightM, valid, sampleCount,
+            speedMps, speedMps >= MIN_CALIB_SPEED_MPS)
     }
 
     fun reset() {

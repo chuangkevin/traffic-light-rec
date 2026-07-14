@@ -51,7 +51,9 @@ data class CameraCalibrationEstimate(
     val heightM: Float = 1.35f,
     val valid: Boolean = false,
     val sampleCount: Int = 0,
-    val rollDeg: Float = 0f
+    val rollDeg: Float = 0f,
+    val speedKmh: Float = 0f,
+    val movingFastEnough: Boolean = false
 )
 
 data class DrivingPlanResult(
@@ -155,6 +157,10 @@ class InferenceEngine(private val context: Context) {
         pipeline?.onImuTilt(tilt, timestampMs)
     }
 
+    fun onSpeed(speedMps: Float) {
+        pipeline?.onSpeed(speedMps)
+    }
+
     suspend fun analyzeDrivingPlan(
         bitmap: Bitmap,
         rotationDegrees: Int,
@@ -183,7 +189,8 @@ class InferenceEngine(private val context: Context) {
                 },
                 path = plan.path.map { PlanPoint(it.x, it.y) },
                 calibration = CameraCalibrationEstimate(
-                    cal.pitchDeg, cal.yawDeg, cal.heightM, cal.valid, cal.sampleCount, cal.rollDeg)
+                    cal.pitchDeg, cal.yawDeg, cal.heightM, cal.valid, cal.sampleCount, cal.rollDeg,
+                    cal.speedMps * 3.6f, cal.movingFastEnough)
             )
         } catch (e: Exception) {
             Log.e("InferenceEngine", "inference failed: ${e.message}", e)

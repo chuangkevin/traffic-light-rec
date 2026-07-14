@@ -22,6 +22,7 @@ import com.example.trafficlight.analyzer.FrameAnalyzer
 import com.example.trafficlight.camera.horizontalFovDeg
 import com.example.trafficlight.inference.InferenceEngine
 import com.example.trafficlight.sensor.ImuManager
+import com.example.trafficlight.sensor.SpeedMonitor
 import com.example.trafficlight.logic.RoiSelector
 import com.example.trafficlight.logic.StateMachine
 import com.example.trafficlight.logic.TrafficLightState
@@ -72,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var frameAnalyzer: FrameAnalyzer
     
     private var imuManager: ImuManager? = null
+    private var speedMonitor: SpeedMonitor? = null
     private var toneGenerator: ToneGenerator? = null
     private var stopSoundEnabled = true
     private var goSoundEnabled = true
@@ -90,8 +92,12 @@ class MainActivity : AppCompatActivity() {
     ) { permissions ->
         val cameraGranted = permissions[Manifest.permission.CAMERA] == true
         val audioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
-        
+
         if (cameraGranted && audioGranted) {
+            if (permissions[Manifest.permission.ACCESS_FINE_LOCATION] != true) {
+                Toast.makeText(this, "未授權定位:校正需要 GPS 車速,將無法自動校正", Toast.LENGTH_LONG).show()
+            }
+            speedMonitor?.start()
             startCamera()
         } else {
             Toast.makeText(this, "需要相機和音頻權限", Toast.LENGTH_SHORT).show()
@@ -198,6 +204,7 @@ class MainActivity : AppCompatActivity() {
         roiSelector = RoiSelector()
         
         imuManager = ImuManager(this) { tilt, ts -> inferenceEngine.onImuTilt(tilt, ts) }
+        speedMonitor = SpeedMonitor(this) { mps -> inferenceEngine.onSpeed(mps) }
 
         frameAnalyzer = FrameAnalyzer(
             inferenceEngine = inferenceEngine,
@@ -236,14 +243,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkPermissions() {
         when {
-            hasCameraPermission() && hasAudioPermission() -> {
+            hasCameraPermission() && hasAudioPermission() && speedMonitor?.hasPermission == true -> {
+                speedMonitor?.start()
                 startCamera()
             }
             else -> {
                 requestPermissionLauncher.launch(
                     arrayOf(
                         Manifest.permission.CAMERA,
-                        Manifest.permission.RECORD_AUDIO
+                        Manifest.permission.RECORD_AUDIO,
+                        Manifest.permission.ACCESS_FINE_LOCATION
                     )
                 )
             }
@@ -363,13 +372,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateCalibStatus(cal: com.example.trafficlight.inference.CameraCalibrationEstimate) {
-        if (cal.valid) {
-            calibStatusText.text = "✓ 校正完成,可用"
-            calibStatusText.setTextColor(0xFF8CFC9A.toInt())
-        } else {
-            val min = com.example.trafficlight.core.calib.CalibrationFusion.MIN_SAMPLES
-            calibStatusText.text = "校正中 ${cal.sampleCount}/$min(行駛中自動完成)"
-            calibStatusText.setTextColor(0xFFFFCC66.toInt())
+        when {
+            cal.valid -> {
+                calibStatusText.text = "✓ 校正完成,可用"
+                calibStatusText.setTextColor(0xFF8CFC9A.toInt())
+            }
+            !cal.movingFastEnough -> {
+                val kmh = com.example.trafficlight.core.calib.CalibrationFusion.MIN_CALIB_SPEED_KMH.toInt()
+                calibStatusText.text = "待機中 ${cal.speedKmh.toInt()} km/h(時速 ≥$kmh 開始校正)"
+                calibStatusText.setTextColor(0xFFBBBBBB.toInt())
+            }
+            else -> {
+                val min = com.example.trafficlight.core.calib.CalibrationFusion.MIN_SAMPLES
+                calibStatusText.text = "校正中 ${cal.sampleCount}/$min"
+                calibStatusText.setTextColor(0xFFFFCC66.toInt())
+            }
         }
     }
 
@@ -406,11 +423,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         imuManager?.start()
+        speedMonitor?.start()
     }
 
     override fun onPause() {
         super.onPause()
         imuManager?.stop()
+        speedMonitor?.stop()
     }
 
     override fun onDestroy() {
