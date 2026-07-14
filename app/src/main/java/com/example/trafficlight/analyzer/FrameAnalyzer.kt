@@ -5,6 +5,7 @@ import android.graphics.ImageFormat
 import android.graphics.YuvImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import com.example.trafficlight.core.frame.rotate90
 import com.example.trafficlight.inference.ClassificationResult
 import com.example.trafficlight.inference.CameraCalibrationEstimate
 import com.example.trafficlight.inference.DrivingAction
@@ -95,54 +96,46 @@ class FrameAnalyzer(
         val shouldRunDetection = frameCounter % detectionInterval == 0
         
         analysisScope.launch {
-            var bitmap: Bitmap? = null
             try {
-                val originalBitmap = convertImageProxyToBitmap(image)
-                // Create a mutable copy to avoid issues with recycled bitmaps from the camera proxy
-                bitmap = originalBitmap.copy(Bitmap.Config.ARGB_8888, true)
-                originalBitmap.recycle()
-
+                val frame = imageProxyToIntImage(image)
                 val imageRotation = image.imageInfo.rotationDegrees
+                image.close()
                 onRotationChanged(imageRotation)
 
                 if (shouldRunDetection) {
-                    runDetection(bitmap, imageRotation, currentTime)
+                    runDetection(frame, imageRotation, currentTime)
                 }
 
                 // core pipeline 已把幀轉正,overlay 座標以轉正後的尺寸為基準
-                val uprightW = if (imageRotation == 90 || imageRotation == 270) bitmap.height else bitmap.width
-                val uprightH = if (imageRotation == 90 || imageRotation == 270) bitmap.width else bitmap.height
+                val uprightW = if (imageRotation == 90 || imageRotation == 270) frame.height else frame.width
+                val uprightH = if (imageRotation == 90 || imageRotation == 270) frame.width else frame.height
                 val result = createAnalysisResult(uprightW, uprightH, 0)
                 withContext(Dispatchers.Main) {
                     onResultCallback(result)
                 }
-                
+
             } catch (t: Throwable) {
                 onDebugCallback("❌ 分析時發生嚴重錯誤: ${t.message}")
-                if (t is OutOfMemoryError) {
-                    onDebugCallback("!! 記憶體不足，請檢查影片解析度是否過高 !!")
-                }
                 t.printStackTrace()
-            } finally {
-                bitmap?.recycle()
-                isProcessing.set(false)
                 image.close()
+            } finally {
+                isProcessing.set(false)
             }
         }
     }
     
-    private fun dumpDebugSnapshot(bitmap: Bitmap, rotationDegrees: Int, fov: Float, plan: com.example.trafficlight.inference.DrivingPlanResult) {
+    private fun dumpDebugSnapshot(frame: com.example.trafficlight.core.frame.IntImage, rotationDegrees: Int, fov: Float, plan: com.example.trafficlight.inference.DrivingPlanResult) {
         try {
             val root = dumpDirProvider() ?: return
             val dir = java.io.File(root, "dump-${System.currentTimeMillis()}")
             dir.mkdirs()
             // 轉正後的幀(與 pipeline 輸入一致)
-            val matrix = android.graphics.Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-            val upright = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            val upright = frame.rotate90(rotationDegrees)
+            val bmp = Bitmap.createBitmap(upright.pixels, upright.width, upright.height, Bitmap.Config.ARGB_8888)
             java.io.FileOutputStream(java.io.File(dir, "frame.png")).use {
-                upright.compress(Bitmap.CompressFormat.PNG, 100, it)
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
-            if (upright !== bitmap) upright.recycle()
+            bmp.recycle()
             val cal = plan.calibration
             val meta = StringBuilder()
             meta.append("fovDeg=$fov\n")
@@ -161,12 +154,12 @@ class FrameAnalyzer(
         }
     }
 
-    private suspend fun runDetection(bitmap: Bitmap, rotationDegrees: Int, currentTime: Long) {
+    private suspend fun runDetection(frame: com.example.trafficlight.core.frame.IntImage, rotationDegrees: Int, currentTime: Long) {
         allDetections = emptyList()
-        val plan = inferenceEngine.analyzeDrivingPlan(bitmap, rotationDegrees, horizontalFovProvider())
+        val plan = inferenceEngine.analyzeDrivingPlan(frame, rotationDegrees, horizontalFovProvider())
         if (dumpRequested) {
             dumpRequested = false
-            dumpDebugSnapshot(bitmap, rotationDegrees, horizontalFovProvider(), plan)
+            dumpDebugSnapshot(frame, rotationDegrees, horizontalFovProvider(), plan)
         }
         shouldStop = plan.shouldStop
         shouldGo = plan.shouldGo
@@ -188,28 +181,39 @@ class FrameAnalyzer(
         lastClassificationTime = currentTime
     }
     
-    private fun convertImageProxyToBitmap(image: ImageProxy): Bitmap {
-        // This is a more direct and efficient method to convert YUV_420_888 to a Bitmap.
-        val yBuffer = image.planes[0].buffer // Y
-        val uBuffer = image.planes[1].buffer // U
-        val vBuffer = image.planes[2].buffer // V
-
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-
-        //U and V are swapped
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
-
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(android.graphics.Rect(0, 0, yuvImage.width, yuvImage.height), 90, out)
-        val imageBytes = out.toByteArray()
-        return android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+    /** YUV_420_888 直轉 ARGB IntImage:無 JPEG 繞路(省 30-50ms/幀、無壓縮失真)。 */
+    private fun imageProxyToIntImage(image: ImageProxy): com.example.trafficlight.core.frame.IntImage {
+        val w = image.width
+        val h = image.height
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuf = yPlane.buffer
+        val uBuf = uPlane.buffer
+        val vBuf = vPlane.buffer
+        val yRowStride = yPlane.rowStride
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
+        val out = IntArray(w * h)
+        for (row in 0 until h) {
+            val yRow = row * yRowStride
+            val uvRow = (row shr 1) * uvRowStride
+            var i = row * w
+            for (col in 0 until w) {
+                val y = (yBuf.get(yRow + col).toInt() and 0xFF)
+                val uvOff = uvRow + (col shr 1) * uvPixelStride
+                val u = (uBuf.get(uvOff).toInt() and 0xFF) - 128
+                val v = (vBuf.get(uvOff).toInt() and 0xFF) - 128
+                var r = y + ((1436 * v) shr 10)
+                var g = y - ((352 * u + 731 * v) shr 10)
+                var b = y + ((1815 * u) shr 10)
+                if (r < 0) r = 0 else if (r > 255) r = 255
+                if (g < 0) g = 0 else if (g > 255) g = 255
+                if (b < 0) b = 0 else if (b > 255) b = 255
+                out[i++] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        }
+        return com.example.trafficlight.core.frame.IntImage(w, h, out)
     }
     
     private fun createAnalysisResult(imageWidth: Int, imageHeight: Int, imageRotation: Int): AnalysisResult {

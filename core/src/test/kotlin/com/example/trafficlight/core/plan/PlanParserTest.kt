@@ -30,6 +30,32 @@ class PlanParserTest {
         assertEquals(DrivingAction.GO, plan.action)
     }
 
+    // 行進中但模型規劃強煞車(前車停止情境)→ 提早報 STOP
+    @Test fun brakingIntentYieldsStopWhileMoving() {
+        val data = FloatArray(33 * 15)
+        for (i in 0 until 33) {
+            // 速度隨規劃時間快速下降:8 m/s 起、每步 -0.5
+            data[i * 15 + 3] = (8f - i * 0.5f).coerceAtLeast(0f)
+            data[i * 15 + 6] = -2f
+            data[i * 15] = i.toFloat()
+        }
+        val plan = parseDrivingPlan(data)
+        assertTrue("expected stop intent, accel=${plan.desiredAcceleration}", plan.shouldStop)
+        assertEquals(DrivingAction.STOP, plan.action)
+    }
+
+    // 輕微減速(跟車調速)不觸發 STOP
+    @Test fun gentleDecelStaysHold() {
+        val data = FloatArray(33 * 15)
+        for (i in 0 until 33) {
+            data[i * 15 + 3] = 15f - i * 0.02f   // 極緩減速
+            data[i * 15 + 6] = -0.1f
+            data[i * 15] = i.toFloat()
+        }
+        val plan = parseDrivingPlan(data)
+        assertEquals(DrivingAction.HOLD, plan.action)
+    }
+
     @Test fun cruisingYieldsHold() {
         val plan = parseDrivingPlan(policyVector(vNow = 15f, vEverywhereElse = 15f))
         assertEquals(DrivingAction.HOLD, plan.action)

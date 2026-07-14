@@ -80,6 +80,7 @@ class InferenceEngine(private val context: Context) {
     companion object {
         private const val VISION_MODEL = "models/openpilot_driving_vision.onnx"
         private const val POLICY_MODEL = "models/openpilot_driving_policy.onnx"
+        private const val USE_NNAPI = false
     }
 
     private inner class OrtModelRunner : ModelRunner {
@@ -142,8 +143,12 @@ class InferenceEngine(private val context: Context) {
         try {
             ortEnvironment = OrtEnvironment.getEnvironment()
             val env = ortEnvironment ?: return@withContext false
-            visionSession = env.createSession(context.assets.open(VISION_MODEL).readBytes())
-            policySession = env.createSession(context.assets.open(POLICY_MODEL).readBytes())
+            val visionBytes = context.assets.open(VISION_MODEL).readBytes()
+            val policyBytes = context.assets.open(POLICY_MODEL).readBytes()
+
+            // 優先 NNAPI(SD 8+ Gen1 硬體加速),失敗退回多執行緒 CPU
+            visionSession = createSessionPreferNnapi(env, visionBytes, "vision")
+            policySession = createSessionPreferNnapi(env, policyBytes, "policy")
             pipeline = DrivingPipeline(OrtModelRunner())
             Log.d("InferenceEngine", "openpilot models ready (core pipeline)")
             true
@@ -151,6 +156,35 @@ class InferenceEngine(private val context: Context) {
             Log.e("InferenceEngine", "openpilot model init failed: ${e.message}", e)
             false
         }
+    }
+
+    private fun createSessionPreferNnapi(env: OrtEnvironment, bytes: ByteArray, tag: String): OrtSession {
+        // 實測:NNAPI 對 openpilot 模型反而更慢(436ms/幀 vs CPU ~100ms)——
+        // 模型含 NNAPI 不支援的算子,圖被切碎跨界搬運。固定走多執行緒 CPU。
+        if (USE_NNAPI) {
+            try {
+                val opts = OrtSession.SessionOptions()
+                opts.addNnapi()
+                val s = env.createSession(bytes, opts)
+                Log.i("InferenceEngine", "$tag: NNAPI enabled")
+                return s
+            } catch (e: Exception) {
+                Log.w("InferenceEngine", "$tag: NNAPI unavailable (${e.message}), CPU fallback")
+            }
+        }
+        try {
+            val opts = OrtSession.SessionOptions()
+            opts.addXnnpack(mapOf("intra_op_num_threads" to "4"))
+            val s = env.createSession(bytes, opts)
+            Log.i("InferenceEngine", "$tag: XNNPACK x4")
+            return s
+        } catch (e: Exception) {
+            Log.w("InferenceEngine", "$tag: XNNPACK unavailable (${e.message})")
+        }
+        val opts = OrtSession.SessionOptions()
+        opts.setIntraOpNumThreads(6)
+        Log.i("InferenceEngine", "$tag: CPU x6 threads")
+        return env.createSession(bytes, opts)
     }
 
     fun onImuTilt(tilt: Tilt, timestampMs: Long) {
@@ -165,18 +199,25 @@ class InferenceEngine(private val context: Context) {
         pipeline?.forceCalibrate()
     }
 
+    private var inferCount = 0
+    private var inferTotalMs = 0L
+
     suspend fun analyzeDrivingPlan(
-        bitmap: Bitmap,
+        frame: IntImage,
         rotationDegrees: Int,
         horizontalFovDeg: Float
     ): DrivingPlanResult = withContext(Dispatchers.Default) {
         val p = pipeline ?: return@withContext DrivingPlanResult(
             false, false, 0f, 0f, 0f, 0f, DrivingAction.HOLD)
         try {
-            val pixels = IntArray(bitmap.width * bitmap.height)
-            bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-            val result = p.processFrame(
-                IntImage(bitmap.width, bitmap.height, pixels), rotationDegrees, horizontalFovDeg)
+            val t0 = android.os.SystemClock.elapsedRealtime()
+            val result = p.processFrame(frame, rotationDegrees, horizontalFovDeg)
+            val dt = android.os.SystemClock.elapsedRealtime() - t0
+            inferTotalMs += dt
+            if (++inferCount % 50 == 0) {
+                Log.i("InferenceEngine", "pipeline avg ${inferTotalMs / 50}ms/frame (last=${dt}ms)")
+                inferTotalMs = 0
+            }
             val plan = result.plan
             val cal = result.calibration
             DrivingPlanResult(

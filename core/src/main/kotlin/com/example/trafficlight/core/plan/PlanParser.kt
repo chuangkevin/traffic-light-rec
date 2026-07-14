@@ -24,6 +24,8 @@ private const val MODEL_ACTION_T_S = 0.075f
 private const val STOPPING_VELOCITY_MPS = 0.3f
 private const val GO_ACCELERATION_MPS2 = 0.45f
 private const val GO_VELOCITY_DELTA_MPS = 0.35f
+/** 模型煞車意圖:規劃減速度低於此值即視為「要停」(不等速度歸零,前車停止時提早警示) */
+private const val BRAKE_INTENT_MPS2 = -1.2f
 
 val EMPTY_PLAN = DrivingPlan(false, false, 0f, 0f, 0f, 0f, DrivingAction.HOLD)
 
@@ -37,7 +39,8 @@ fun parseDrivingPlan(policyData: FloatArray): DrivingPlan {
     }.filter { it.x.isFinite() && it.y.isFinite() && it.x >= 0f }
     val accelerationNow = policyData[PLAN_ACCELERATION_X]
     val desiredAcceleration = desiredAcceleration(policyData, nearVelocity, accelerationNow)
-    val shouldStop = nearVelocity < STOPPING_VELOCITY_MPS && desiredAcceleration < 0.1f
+    val shouldStop = (nearVelocity < STOPPING_VELOCITY_MPS && desiredAcceleration < 0.1f) ||
+        desiredAcceleration < BRAKE_INTENT_MPS2
     val velocityDelta = futureVelocity - nearVelocity
     val shouldGo = !shouldStop && nearVelocity < 1.5f &&
         desiredAcceleration > GO_ACCELERATION_MPS2 && velocityDelta > GO_VELOCITY_DELTA_MPS
