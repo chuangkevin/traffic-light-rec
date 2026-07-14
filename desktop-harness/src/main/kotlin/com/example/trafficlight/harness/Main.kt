@@ -68,7 +68,87 @@ fun rotateByDegrees(img: BufferedImage, rollDeg: Double): BufferedImage {
     return out
 }
 
+/** 畫路面網格(橫線每 10m、縱線 -3.5/0/+3.5m)供地平線/透視比對。 */
+private fun drawRoadGrid(
+    g: java.awt.Graphics2D, cal: CalibrationState, imgW: Float, imgH: Float, fovDeg: Float
+) {
+    val roll = Math.toRadians(cal.rollDeg.toDouble()).toFloat()
+    val pitch = Math.toRadians(cal.pitchDeg.toDouble()).toFloat()
+    val yaw = Math.toRadians(cal.yawDeg.toDouble()).toFloat()
+    g.color = Color(80, 180, 255, 160)
+    g.stroke = BasicStroke(2f)
+    for (f in intArrayOf(5, 10, 20, 30, 45)) {
+        val a = roadToImage(f.toFloat(), -5f, cal.heightM, imgW, imgH, fovDeg, roll, pitch, yaw)
+        val b = roadToImage(f.toFloat(), 5f, cal.heightM, imgW, imgH, fovDeg, roll, pitch, yaw)
+        if (a != null && b != null) {
+            g.drawLine(a.first.toInt(), a.second.toInt(), b.first.toInt(), b.second.toInt())
+            g.drawString("${f}m", (b.first + 4).toInt(), b.second.toInt())
+        }
+    }
+    for (lat in floatArrayOf(-3.5f, 0f, 3.5f)) {
+        var prev: Pair<Float, Float>? = null
+        var f = 4f
+        while (f <= 60f) {
+            val p = roadToImage(f, lat, cal.heightM, imgW, imgH, fovDeg, roll, pitch, yaw)
+            if (prev != null && p != null) {
+                g.drawLine(prev.first.toInt(), prev.second.toInt(), p.first.toInt(), p.second.toInt())
+            }
+            prev = p
+            f += 4f
+        }
+    }
+}
+
+/** render-dump 模式:讀手機偵錯快照,用四種 roll/pitch 正負號組合各輸出一張比對圖。 */
+fun renderDump(dumpDir: File, outDir: File) {
+    val meta = File(dumpDir, "meta.txt").readLines()
+        .mapNotNull { line -> line.split("=", limit = 2).takeIf { it.size == 2 }?.let { it[0] to it[1] } }
+        .groupBy({ it.first }, { it.second })
+    fun v(key: String) = meta[key]?.first()?.toFloat() ?: 0f
+    val path = meta["path"].orEmpty().map {
+        val (x, y) = it.split(","); PlanPoint(x.toFloat(), y.toFloat())
+    }
+    val frame = ImageIO.read(File(dumpDir, "frame.png"))
+    val fov = v("fovDeg")
+    outDir.mkdirs()
+
+    for ((label, rollSign, pitchSign) in listOf(
+        Triple("r+p+", 1f, 1f), Triple("r+p-", 1f, -1f),
+        Triple("r-p+", -1f, 1f), Triple("r-p-", -1f, -1f)
+    )) {
+        val cal = CalibrationState(
+            rollDeg = v("rollDeg") * rollSign,
+            pitchDeg = v("pitchDeg") * pitchSign,
+            yawDeg = v("yawDeg"),
+            heightM = v("heightM"),
+            valid = true, sampleCount = 0
+        )
+        val out = BufferedImage(frame.width, frame.height, BufferedImage.TYPE_INT_RGB)
+        val g = out.createGraphics()
+        g.drawImage(frame, 0, 0, null)
+        drawRoadGrid(g, cal, frame.width.toFloat(), frame.height.toFloat(), fov)
+        drawPath(g, path, cal, frame.width.toFloat(), frame.height.toFloat(), fov)
+        g.color = Color.WHITE
+        g.fillRect(0, 0, 340, 28)
+        g.color = Color.BLACK
+        g.drawString("$label roll=${cal.rollDeg} pitch=${cal.pitchDeg} fov=$fov", 6, 20)
+        g.dispose()
+        ImageIO.write(out, "png", File(outDir, "${dumpDir.name}-$label.png"))
+    }
+    println("rendered 4 variants for ${dumpDir.name} -> $outDir")
+}
+
 fun main(args: Array<String>) {
+    if (args.isNotEmpty() && args[0] == "render-dump") {
+        require(args.size >= 3) { "usage: render-dump <dumpRoot> <outDir>" }
+        val root = File(args[1])
+        val outDir = File(args[2])
+        val dumps = root.listFiles { f -> f.isDirectory && File(f, "meta.txt").exists() }
+            ?.sortedBy { it.name } ?: emptyList()
+        require(dumps.isNotEmpty()) { "no dumps in $root" }
+        dumps.forEach { renderDump(it, outDir) }
+        return
+    }
     require(args.size >= 2) { "usage: <framesDir> <outDir> [rollDeg] [fovDeg]" }
     val framesDir = File(args[0])
     val outDir = File(args[1]).apply { mkdirs() }

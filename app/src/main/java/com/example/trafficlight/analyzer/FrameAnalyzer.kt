@@ -26,8 +26,13 @@ class FrameAnalyzer(
     private val onResultCallback: (AnalysisResult) -> Unit,
     private val onDebugCallback: (String) -> Unit = {},
     private val horizontalFovProvider: () -> Float = { 72f },
-    private val onRotationChanged: (Int) -> Unit = {}
+    private val onRotationChanged: (Int) -> Unit = {},
+    private val dumpDirProvider: () -> java.io.File? = { null }
 ) : ImageAnalysis.Analyzer {
+
+    /** 設為 true 後,下一個推理幀會把畫面+校正值+路徑存到 dumpDir(遠端偵錯用)。 */
+    @Volatile
+    var dumpRequested = false
 
     private var frameCounter = 0
     private var lastDetectionTime = 0L
@@ -40,7 +45,9 @@ class FrameAnalyzer(
     private var shouldGo = false
     private var cameraCalibration = CameraCalibrationEstimate()
     
-    private val detectionInterval = 4
+    // 每個非忙碌幀都推理:openpilot 模型期望 ~50ms 間隔的連續幀對,
+    // 間隔越接近訓練分布,速度/距離估計越準(舊值 4 → 間隔 >133ms)
+    private val detectionInterval = 1
     private val analysisScope = CoroutineScope(Dispatchers.Default)
     private val isProcessing = AtomicBoolean(false)
 
@@ -124,9 +131,43 @@ class FrameAnalyzer(
         }
     }
     
+    private fun dumpDebugSnapshot(bitmap: Bitmap, rotationDegrees: Int, fov: Float, plan: com.example.trafficlight.inference.DrivingPlanResult) {
+        try {
+            val root = dumpDirProvider() ?: return
+            val dir = java.io.File(root, "dump-${System.currentTimeMillis()}")
+            dir.mkdirs()
+            // 轉正後的幀(與 pipeline 輸入一致)
+            val matrix = android.graphics.Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+            val upright = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            java.io.FileOutputStream(java.io.File(dir, "frame.png")).use {
+                upright.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            if (upright !== bitmap) upright.recycle()
+            val cal = plan.calibration
+            val meta = StringBuilder()
+            meta.append("fovDeg=$fov\n")
+            meta.append("rollDeg=${cal.rollDeg}\n")
+            meta.append("pitchDeg=${cal.pitchDeg}\n")
+            meta.append("yawDeg=${cal.yawDeg}\n")
+            meta.append("heightM=${cal.heightM}\n")
+            meta.append("valid=${cal.valid}\n")
+            meta.append("sampleCount=${cal.sampleCount}\n")
+            meta.append("action=${plan.action}\n")
+            plan.path.forEach { meta.append("path=${it.x},${it.y}\n") }
+            java.io.File(dir, "meta.txt").writeText(meta.toString())
+            onDebugCallback("偵錯快照已存:${dir.name}")
+        } catch (e: Exception) {
+            onDebugCallback("偵錯快照失敗:${e.message}")
+        }
+    }
+
     private suspend fun runDetection(bitmap: Bitmap, rotationDegrees: Int, currentTime: Long) {
         allDetections = emptyList()
         val plan = inferenceEngine.analyzeDrivingPlan(bitmap, rotationDegrees, horizontalFovProvider())
+        if (dumpRequested) {
+            dumpRequested = false
+            dumpDebugSnapshot(bitmap, rotationDegrees, horizontalFovProvider(), plan)
+        }
         shouldStop = plan.shouldStop
         shouldGo = plan.shouldGo
         val classId = when (plan.action) {

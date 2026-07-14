@@ -16,9 +16,10 @@ fun horizontalFovDeg(cameraInfo: CameraInfo, zoomRatio: Float, fallbackDeg: Floa
         val sensorSize = c2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
         if (focalLengths == null || focalLengths.isEmpty() || sensorSize == null) return fallbackDeg
         val fl = focalLengths[0]
-        val baseFov = Math.toDegrees(2.0 * atan((sensorSize.width / (2f * fl)).toDouble())).toFloat()
-        // 數位變焦縮小視角
-        baseFov / zoomRatio.coerceAtLeast(1f)
+        // 變焦是裁切:half-FOV 的 tan 除以 zoom,再轉回角度(FOV/zoom 是錯的近似)
+        val baseHalfTan = sensorSize.width / (2f * fl)
+        val effHalfTan = baseHalfTan / zoomRatio.coerceAtLeast(1f)
+        Math.toDegrees(2.0 * atan(effHalfTan.toDouble())).toFloat()
     } catch (e: Exception) {
         fallbackDeg
     }

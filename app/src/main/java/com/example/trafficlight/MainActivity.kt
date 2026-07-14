@@ -215,8 +215,17 @@ class MainActivity : AppCompatActivity() {
             horizontalFovProvider = {
                 cameraInfo?.let { horizontalFovDeg(it, currentZoomRatio) } ?: 72f
             },
-            onRotationChanged = { imuManager?.rotationDegrees = it }
+            onRotationChanged = { imuManager?.rotationDegrees = it },
+            dumpDirProvider = { getExternalFilesDir(null) }
         )
+
+        // 遠端偵錯:adb shell am broadcast -a com.example.trafficlight.DUMP 觸發快照
+        registerReceiver(object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: android.content.Context?, i: android.content.Intent?) {
+                frameAnalyzer.dumpRequested = true
+            }
+        }, android.content.IntentFilter("com.example.trafficlight.DUMP"),
+            android.content.Context.RECEIVER_EXPORTED)
 
         // Pass view dimensions to analyzer once the view is laid out
         overlayView.post {
