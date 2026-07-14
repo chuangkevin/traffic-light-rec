@@ -13,6 +13,7 @@ import android.view.View
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.example.trafficlight.R
+import com.example.trafficlight.core.geometry.roadToImage
 import com.example.trafficlight.inference.CameraCalibrationEstimate
 import com.example.trafficlight.inference.DetectionResult
 import com.example.trafficlight.inference.PlanPoint
@@ -36,8 +37,9 @@ class OverlayView @JvmOverloads constructor(
     private var statusFrameWidth = 28f
     private var cameraHeightOffsetM = 0f
     private var cameraPitchOffsetDeg = 0f
-    private var cameraHorizontalFovDeg = 72f
+    private var cameraFovOffsetDeg = 0f
     private var cameraLateralOffsetM = 0f
+    private var dynamicFovDeg = 72f
     private var autoCalibration = CameraCalibrationEstimate()
 
     private val prefs = context.getSharedPreferences("route_calibration", Context.MODE_PRIVATE)
@@ -88,7 +90,7 @@ class OverlayView @JvmOverloads constructor(
         statusFrameWidth = prefs.getFloat("statusFrameWidth", 28f)
         cameraHeightOffsetM = prefs.getFloat("cameraHeightOffsetM", 0f)
         cameraPitchOffsetDeg = prefs.getFloat("cameraPitchOffsetDeg", 0f)
-        cameraHorizontalFovDeg = prefs.getFloat("cameraHorizontalFovDeg", 72f)
+        cameraFovOffsetDeg = prefs.getFloat("cameraFovOffsetDeg", 0f)
         cameraLateralOffsetM = prefs.getFloat("cameraLateralOffsetM", 0f)
     }
 
@@ -100,9 +102,11 @@ class OverlayView @JvmOverloads constructor(
         pathPoints: List<PlanPoint> = emptyList(),
         shouldStop: Boolean = false,
         shouldGo: Boolean = false,
-        cameraCalibration: CameraCalibrationEstimate = CameraCalibrationEstimate()
+        cameraCalibration: CameraCalibrationEstimate = CameraCalibrationEstimate(),
+        horizontalFovDeg: Float = 72f
     ) {
         this.detections = detections
+        this.dynamicFovDeg = horizontalFovDeg
         this.pathPoints = pathPoints
         this.routeShouldStop = shouldStop
         this.routeShouldGo = shouldGo
@@ -147,9 +151,9 @@ class OverlayView @JvmOverloads constructor(
     }
 
     fun adjustCameraFov(deltaDeg: Float) {
-        cameraHorizontalFovDeg = (cameraHorizontalFovDeg + deltaDeg).coerceIn(35f, 110f)
+        cameraFovOffsetDeg = (cameraFovOffsetDeg + deltaDeg).coerceIn(-20f, 20f)
         saveCalibration()
-        Toast.makeText(context, "FOV ${cameraHorizontalFovDeg.toInt()}°", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "FOV 微調 ${String.format("%.0f", cameraFovOffsetDeg)}°", Toast.LENGTH_SHORT).show()
         invalidate()
     }
 
@@ -172,7 +176,7 @@ class OverlayView @JvmOverloads constructor(
         routeWidthScale = 1f
         cameraHeightOffsetM = 0f
         cameraPitchOffsetDeg = 0f
-        cameraHorizontalFovDeg = 72f
+        cameraFovOffsetDeg = 0f
         cameraLateralOffsetM = 0f
         saveCalibration()
         Toast.makeText(context, "校正已重設", Toast.LENGTH_SHORT).show()
@@ -186,7 +190,7 @@ class OverlayView @JvmOverloads constructor(
             .putFloat("statusFrameWidth", statusFrameWidth)
             .putFloat("cameraHeightOffsetM", cameraHeightOffsetM)
             .putFloat("cameraPitchOffsetDeg", cameraPitchOffsetDeg)
-            .putFloat("cameraHorizontalFovDeg", cameraHorizontalFovDeg)
+            .putFloat("cameraFovOffsetDeg", cameraFovOffsetDeg)
             .putFloat("cameraLateralOffsetM", cameraLateralOffsetM)
             .apply()
     }
@@ -327,35 +331,35 @@ class OverlayView @JvmOverloads constructor(
     }
 
     private fun projectPlanPoint(point: PlanPoint): PointF? {
-        // Model warp calibration is a small openpilot-style correction, not the phone's road-facing mount pitch.
-        // Keep overlay projection on a physical mount pitch and only use auto calibration for yaw/height hints.
-        val basePitchDeg = 5.5f
-        val baseHeightM = if (autoCalibration.valid) autoCalibration.heightM else 1.35f
-        val yawDeg = if (autoCalibration.valid) autoCalibration.yawDeg else 0f
-        val forward = point.x.coerceIn(0.5f, 90f)
-        val lateral = point.y + cameraLateralOffsetM
-        val yaw = Math.toRadians(yawDeg.toDouble())
-        val cosYaw = kotlin.math.cos(yaw).toFloat()
-        val sinYaw = kotlin.math.sin(yaw).toFloat()
-        val yawCorrectedForward = cosYaw * forward - sinYaw * lateral
-        val yawCorrectedLateral = sinYaw * forward + cosYaw * lateral
-        val right = -yawCorrectedLateral
-        val down = (baseHeightM + cameraHeightOffsetM).coerceIn(0.70f, 2.20f)
+        if (imageWidth <= 1 || imageHeight <= 1 || width == 0 || height == 0) return null
+        // 與 core pipeline 共用同一套相機模型:roll/pitch/yaw 來自 IMU+模型融合校正
+        val rollRad = Math.toRadians(autoCalibration.rollDeg.toDouble()).toFloat()
+        val pitchRad = Math.toRadians(
+            (autoCalibration.pitchDeg + cameraPitchOffsetDeg).toDouble()).toFloat()
+        val yawRad = Math.toRadians(autoCalibration.yawDeg.toDouble()).toFloat()
+        val cameraHeightM = (autoCalibration.heightM + cameraHeightOffsetM).coerceIn(0.70f, 2.20f)
 
-        val pitch = Math.toRadians((basePitchDeg + cameraPitchOffsetDeg).coerceIn(-6f, 22f).toDouble())
-        val cosPitch = kotlin.math.cos(pitch).toFloat()
-        val sinPitch = kotlin.math.sin(pitch).toFloat()
-        val camY = cosPitch * down - sinPitch * yawCorrectedForward
-        val camZ = sinPitch * down + cosPitch * yawCorrectedForward
-        if (camZ <= 0.1f) return null
+        val img = roadToImage(
+            forwardM = point.x.coerceIn(0.5f, 90f),
+            lateralLeftM = point.y + cameraLateralOffsetM,
+            heightM = cameraHeightM,
+            imageWidth = imageWidth.toFloat(),
+            imageHeight = imageHeight.toFloat(),
+            horizontalFovDeg = dynamicFovDeg + cameraFovOffsetDeg,
+            rollRad = rollRad,
+            pitchRad = pitchRad,
+            yawRad = yawRad
+        ) ?: return null
 
-        val fx = (width / 2f) / kotlin.math.tan(Math.toRadians((cameraHorizontalFovDeg / 2f).toDouble())).toFloat()
-        val fy = fx
-        val cx = width / 2f
-        val cy = height / 2f + height * routeVerticalOffset
-        val screenX = cx + fx * right / camZ
-        val screenY = cy + fy * camY / camZ
-        if (screenY !in -height * 0.15f..height * 1.15f) return null
+        // 影像座標 → 螢幕座標:PreviewView 預設 FILL_CENTER(等比放大、置中裁切)
+        val viewW = width.toFloat()
+        val viewH = height.toFloat()
+        val scale = maxOf(viewW / imageWidth, viewH / imageHeight)
+        val dx = (viewW - imageWidth * scale) / 2f
+        val dy = (viewH - imageHeight * scale) / 2f
+        val screenX = img.first * scale + dx
+        val screenY = img.second * scale + dy + viewH * routeVerticalOffset
+        if (screenY !in -viewH * 0.15f..viewH * 1.15f) return null
         return PointF(screenX, screenY)
     }
 

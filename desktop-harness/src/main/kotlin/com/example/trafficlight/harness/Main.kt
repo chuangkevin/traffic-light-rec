@@ -1,8 +1,12 @@
 package com.example.trafficlight.harness
 
+import com.example.trafficlight.core.calib.CalibrationState
 import com.example.trafficlight.core.calib.Tilt
 import com.example.trafficlight.core.frame.IntImage
+import com.example.trafficlight.core.geometry.roadToImage
 import com.example.trafficlight.core.pipeline.DrivingPipeline
+import com.example.trafficlight.core.plan.PlanPoint
+import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.geom.AffineTransform
 import java.awt.image.BufferedImage
@@ -13,6 +17,42 @@ fun bufferedToIntImage(img: BufferedImage): IntImage {
     val pixels = IntArray(img.width * img.height)
     img.getRGB(0, 0, img.width, img.height, pixels, 0, img.width)
     return IntImage(img.width, img.height, pixels)
+}
+
+/** 用與 app OverlayView 相同的 core 投影把規劃路徑畫到幀上(驗證路徑壓在馬路上)。 */
+fun drawPath(
+    g: java.awt.Graphics2D,
+    path: List<PlanPoint>,
+    cal: CalibrationState,
+    imgW: Float,
+    imgH: Float,
+    fovDeg: Float
+) {
+    val rollRad = Math.toRadians(cal.rollDeg.toDouble()).toFloat()
+    val pitchRad = Math.toRadians(cal.pitchDeg.toDouble()).toFloat()
+    val yawRad = Math.toRadians(cal.yawDeg.toDouble()).toFloat()
+    val pts = path.filter { it.x > 0.5f }.mapNotNull { p ->
+        roadToImage(p.x, p.y, cal.heightM, imgW, imgH, fovDeg, rollRad, pitchRad, yawRad)
+    }
+    if (pts.size < 2) return
+    g.color = Color(0, 255, 120, 200)
+    g.stroke = BasicStroke(4f)
+    for (i in 1 until pts.size) {
+        g.drawLine(pts[i - 1].first.toInt(), pts[i - 1].second.toInt(),
+            pts[i].first.toInt(), pts[i].second.toInt())
+    }
+    // 車道寬參考線(±1.75m)
+    g.color = Color(255, 255, 0, 130)
+    g.stroke = BasicStroke(2f)
+    for (edge in floatArrayOf(-1.75f, 1.75f)) {
+        val edgePts = path.filter { it.x > 0.5f }.mapNotNull { p ->
+            roadToImage(p.x, p.y + edge, cal.heightM, imgW, imgH, fovDeg, rollRad, pitchRad, yawRad)
+        }
+        for (i in 1 until edgePts.size) {
+            g.drawLine(edgePts[i - 1].first.toInt(), edgePts[i - 1].second.toInt(),
+                edgePts[i].first.toInt(), edgePts[i].second.toInt())
+        }
+    }
 }
 
 /** 以影像中心旋轉 rollDeg(模擬歪斜的手機),尺寸不變、出界填黑。 */
@@ -69,6 +109,7 @@ fun main(args: Array<String>) {
         val annotated = BufferedImage(input.width, input.height, BufferedImage.TYPE_INT_RGB)
         val g = annotated.createGraphics()
         g.drawImage(input, 0, 0, null)
+        drawPath(g, plan.path, result.calibration, input.width.toFloat(), input.height.toFloat(), fovDeg)
         g.color = when (plan.action.name) {
             "STOP" -> Color.RED
             "GO" -> Color.GREEN

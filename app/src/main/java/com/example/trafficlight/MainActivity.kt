@@ -290,9 +290,13 @@ class MainActivity : AppCompatActivity() {
     private fun bindCameraUseCases() {
         val cameraProvider = cameraProvider ?: return
         
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(previewView.surfaceProvider)
-        }
+        // 預覽與分析都固定 4:3:兩條流的視野一致,overlay 的影像→螢幕映射才會對齊
+        @Suppress("DEPRECATION")
+        val preview = Preview.Builder()
+            .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+            .build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
         
         imageAnalysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -365,7 +369,8 @@ class MainActivity : AppCompatActivity() {
                 result.pathPoints,
                 result.shouldStop,
                 result.shouldGo,
-                result.cameraCalibration
+                result.cameraCalibration,
+                result.horizontalFovDeg
             )
             
         }

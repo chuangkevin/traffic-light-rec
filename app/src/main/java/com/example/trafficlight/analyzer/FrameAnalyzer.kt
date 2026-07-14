@@ -63,6 +63,7 @@ class FrameAnalyzer(
         val imageWidth: Int,
         val imageHeight: Int,
         val imageRotation: Int,
+        val horizontalFovDeg: Float,
         val currentState: String,
         val confidence: Float,
         val fps: Int,
@@ -171,6 +172,7 @@ class FrameAnalyzer(
     }
     
     private fun createAnalysisResult(imageWidth: Int, imageHeight: Int, imageRotation: Int): AnalysisResult {
+        val horizontalFov = horizontalFovProvider()
         val currentState = stateMachine.getCurrentStateString()
         val confidence = stateMachine.getStateConfidence()
         val fps = fpsCounter.getFps()
@@ -182,6 +184,7 @@ class FrameAnalyzer(
             imageWidth = imageWidth,
             imageHeight = imageHeight,
             imageRotation = imageRotation,
+            horizontalFovDeg = horizontalFov,
             currentState = currentState,
             confidence = confidence,
             fps = fps,
