@@ -81,6 +81,26 @@ class MainActivity : AppCompatActivity() {
     
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageAnalysis: ImageAnalysis? = null
+    private var previewUseCase: Preview? = null
+
+    // 180° 翻轉不會觸發 configuration change(portrait↔reversePortrait 同為 portrait),
+    // 必須監聽顯示旋轉,任何變化都更新 CameraX targetRotation,幀才會正確轉正。
+    private val displayManager by lazy {
+        getSystemService(android.content.Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+    }
+    private val displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) {
+            val rotation = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                display?.rotation
+            } else {
+                @Suppress("DEPRECATION") windowManager.defaultDisplay?.rotation
+            } ?: return
+            imageAnalysis?.targetRotation = rotation
+            previewUseCase?.targetRotation = rotation
+        }
+    }
     private var cameraControl: CameraControl? = null
     private var cameraInfo: CameraInfo? = null
     private var currentZoomRatio = 1.4f
@@ -313,6 +333,7 @@ class MainActivity : AppCompatActivity() {
             .build().also {
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
+        previewUseCase = preview
         
         imageAnalysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -445,12 +466,14 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         imuManager?.start()
         speedMonitor?.start()
+        displayManager.registerDisplayListener(displayListener, null)
     }
 
     override fun onPause() {
         super.onPause()
         imuManager?.stop()
         speedMonitor?.stop()
+        displayManager.unregisterDisplayListener(displayListener)
     }
 
     override fun onDestroy() {
