@@ -161,6 +161,10 @@ class InferenceEngine(private val context: Context) {
         pipeline?.onSpeed(speedMps)
     }
 
+    fun forceCalibrate() {
+        pipeline?.forceCalibrate()
+    }
+
     suspend fun analyzeDrivingPlan(
         bitmap: Bitmap,
         rotationDegrees: Int,

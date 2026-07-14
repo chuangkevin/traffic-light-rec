@@ -124,6 +124,15 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
             speedMps, speedMps >= MIN_CALIB_SPEED_MPS)
     }
 
+    /** 一鍵強制校正:立即以當前 IMU 姿態為有效校正,不等車速與樣本累積。 */
+    fun forceCalibrate() {
+        modelPitchDeg = imuPitchDeg
+        modelYawDeg = 0f
+        sampleCount = MIN_SAMPLES
+        valid = true
+        warpWasActive = true
+    }
+
     fun reset() {
         sampleCount = 0
         valid = false

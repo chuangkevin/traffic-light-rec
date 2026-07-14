@@ -45,6 +45,12 @@ class DrivingPipeline(
     /** GPS 車速(m/s),用於校正速度閘門。 */
     fun onSpeed(mps: Float) = calibration.onSpeed(mps)
 
+    /** 一鍵強制校正:立即生效並重置時序緩衝(輸入幾何改變)。 */
+    fun forceCalibrate() {
+        calibration.forceCalibrate()
+        resetTemporalBuffers()
+    }
+
     fun onImuTilt(tilt: Tilt, timestampMs: Long): Boolean {
         val sudden = calibration.onImuTilt(tilt, timestampMs)
         if (sudden) resetTemporalBuffers()

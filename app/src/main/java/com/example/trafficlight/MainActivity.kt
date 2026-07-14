@@ -42,6 +42,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlayView: OverlayView
     private lateinit var statusText: TextView
     private lateinit var calibStatusText: TextView
+    private lateinit var forceCalibButton: Button
     private lateinit var fpsText: TextView
     private lateinit var debugText: TextView
     private lateinit var controlPanel: View
@@ -120,6 +121,12 @@ class MainActivity : AppCompatActivity() {
         overlayView = findViewById(R.id.overlayView)
         statusText = findViewById(R.id.statusText)
         calibStatusText = findViewById(R.id.calibStatusText)
+        forceCalibButton = findViewById(R.id.forceCalibButton)
+        forceCalibButton.setOnClickListener {
+            inferenceEngine.forceCalibrate()
+            stateMachine.muteFor(500L)
+            Toast.makeText(this, "已強制校正(採用當前手機姿態)", Toast.LENGTH_SHORT).show()
+        }
         fpsText = findViewById(R.id.fpsText)
         debugText = findViewById(R.id.debugText)
         controlPanel = findViewById(R.id.controlPanel)

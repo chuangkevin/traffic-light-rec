@@ -28,6 +28,17 @@
         android:textSize="14sp"
         android:textStyle="bold" />
 
+    <Button
+        android:id="@+id/forceCalibButton"
+        android:layout_width="wrap_content"
+        android:layout_height="40dp"
+        android:layout_gravity="top|center_horizontal"
+        android:layout_marginTop="52dp"
+        android:backgroundTint="#CC2255AA"
+        android:text="強制校正"
+        android:textColor="#FFFFFF"
+        android:textSize="13sp" />
+
     <LinearLayout
         android:id="@+id/controlPanel"
         android:layout_width="wrap_content"

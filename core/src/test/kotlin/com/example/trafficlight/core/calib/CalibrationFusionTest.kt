@@ -84,6 +84,25 @@ class CalibrationFusionTest {
         assertTrue(f.state().movingFastEnough)
     }
 
+    @Test fun forceCalibrateIsImmediatelyValid() {
+        val f = CalibrationFusion()
+        f.onImuTilt(Tilt(rollDeg = 2f, pitchDeg = -8f), 0L)
+        f.forceCalibrate()
+        assertTrue(f.state().valid)
+        assertEquals(-8f, f.state().pitchDeg, 0.1f)   // 直接採用 IMU pitch
+        assertEquals(2f, f.state().rollDeg, 0.1f)
+    }
+
+    @Test fun forceCalibrateStillResetsOnSuddenTilt() {
+        val f = CalibrationFusion()
+        var t = 0L
+        repeat(50) { t += 20; f.onImuTilt(Tilt(0f, -5f), t) }
+        f.forceCalibrate()
+        assertTrue(f.state().valid)
+        assertTrue(f.onImuTilt(Tilt(20f, -5f), t + 20))  // 突變 → 重置
+        assertFalse(f.state().valid)
+    }
+
     @Test fun modelOutputsRefinePitchAndActivateWarp() {
         val f = CalibrationFusion()
         f.onSpeed(10f) // 36 km/h,超過校正速度門檻
