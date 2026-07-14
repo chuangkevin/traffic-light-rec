@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var overlayView: OverlayView
     private lateinit var statusText: TextView
+    private lateinit var calibStatusText: TextView
     private lateinit var fpsText: TextView
     private lateinit var debugText: TextView
     private lateinit var controlPanel: View
@@ -112,6 +113,7 @@ class MainActivity : AppCompatActivity() {
         previewView = findViewById(R.id.previewView)
         overlayView = findViewById(R.id.overlayView)
         statusText = findViewById(R.id.statusText)
+        calibStatusText = findViewById(R.id.calibStatusText)
         fpsText = findViewById(R.id.fpsText)
         debugText = findViewById(R.id.debugText)
         controlPanel = findViewById(R.id.controlPanel)
@@ -343,6 +345,7 @@ class MainActivity : AppCompatActivity() {
         runOnUiThread {
             statusText.text = result.currentState
             fpsText.text = "FPS: ${result.fps}"
+            updateCalibStatus(result.cameraCalibration)
             
             // 更新所有檢測結果到 overlay
             overlayView.setResults(
@@ -356,6 +359,17 @@ class MainActivity : AppCompatActivity() {
                 result.cameraCalibration
             )
             
+        }
+    }
+
+    private fun updateCalibStatus(cal: com.example.trafficlight.inference.CameraCalibrationEstimate) {
+        if (cal.valid) {
+            calibStatusText.text = "✓ 校正完成,可用"
+            calibStatusText.setTextColor(0xFF8CFC9A.toInt())
+        } else {
+            val min = com.example.trafficlight.core.calib.CalibrationFusion.MIN_SAMPLES
+            calibStatusText.text = "校正中 ${cal.sampleCount}/$min(行駛中自動完成)"
+            calibStatusText.setTextColor(0xFFFFCC66.toInt())
         }
     }
 

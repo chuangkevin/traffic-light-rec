@@ -33,7 +33,7 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
         private set
 
     companion object {
-        private const val MIN_SAMPLES = 20
+        const val MIN_SAMPLES = 20
         private const val IMU_TAU_S = 0.5f            // 低通時間常數
         private const val SUDDEN_CHANGE_DEG = 6f       // 觀測值 vs 濾波值差異閾值
         private const val VISION_POSE_START = 87
