@@ -27,12 +27,13 @@ class ImuTiltTest {
         assertEquals(10f, kotlin.math.abs(t.rollDeg), 1.0f)
     }
 
-    // 直向、上仰 15°(頂往後倒):gz = sin15°·g
+    // 直向、上仰 15°(頂往後倒,相機朝上):gz = sin15°·g
+    // 矩陣慣例正 pitch = 相機朝下 → 相機朝上要回報 -15
     @Test fun pitchUpDetected() {
         val g = 9.81f
         val gy = (g * kotlin.math.cos(Math.toRadians(15.0))).toFloat()
         val gz = (g * kotlin.math.sin(Math.toRadians(15.0))).toFloat()
         val t = tiltFromGravity(0f, gy, gz, rotationDegrees = 90)
-        assertEquals(15f, t.pitchDeg, 1.0f)
+        assertEquals(-15f, t.pitchDeg, 1.0f)
     }
 }

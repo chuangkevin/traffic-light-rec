@@ -24,7 +24,9 @@ fun tiltFromGravity(gx: Float, gy: Float, gz: Float, rotationDegrees: Int): Tilt
     while (roll > 180f) roll -= 360f
     while (roll < -180f) roll += 360f
 
+    // 投影矩陣慣例:正 pitch = 相機朝下。手機後仰(相機朝上,gz>0)時必須回報負值,
+    // 否則 warp 與路徑投影會往錯誤方向補償兩倍(實測:路線完全偏離路面)。
     val gPlane = sqrt((gx * gx + gy * gy).toDouble()).toFloat()
-    val pitch = Math.toDegrees(atan2(gz.toDouble(), gPlane.toDouble())).toFloat()
+    val pitch = -Math.toDegrees(atan2(gz.toDouble(), gPlane.toDouble())).toFloat()
     return Tilt(roll, pitch)
 }
