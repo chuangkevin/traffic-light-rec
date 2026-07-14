@@ -30,10 +30,11 @@ class CalibrationFusionTest {
         val f = CalibrationFusion()
         var t = 0L
         repeat(150) { t += 20; f.onImuTilt(Tilt(0f, 0f), t) }
-        // 突然 +20°(手機被重新擺放)
+        // 突然 +20°(手機被重新擺放)→ 通知重置緩衝、IMU 立即跟上
         val reset = f.onImuTilt(Tilt(20f, 0f), t + 20)
         assertTrue(reset)
         assertEquals(0, f.state().sampleCount)
+        assertEquals(20f, f.state().rollDeg, 0.5f)
     }
 
     @Test fun smallVibrationDoesNotReset() {
@@ -93,33 +94,37 @@ class CalibrationFusionTest {
         assertEquals(2f, f.state().rollDeg, 0.1f)
     }
 
-    @Test fun forceCalibrateStillResetsOnSuddenTilt() {
+    @Test fun forceCalibrateSurvivesSuddenTilt() {
         val f = CalibrationFusion()
         var t = 0L
         repeat(50) { t += 20; f.onImuTilt(Tilt(0f, -5f), t) }
         f.forceCalibrate()
         assertTrue(f.state().valid)
-        assertTrue(f.onImuTilt(Tilt(20f, -5f), t + 20))  // 突變 → 重置
-        assertFalse(f.state().valid)
+        assertTrue(f.onImuTilt(Tilt(20f, -5f), t + 20))  // 突變 → 重置緩衝
+        assertTrue(f.state().valid)                       // 但校正不作廢(IMU 即時跟隨)
+        assertEquals(20f, f.state().rollDeg, 0.5f)
     }
 
-    @Test fun modelOutputsRefinePitchAndActivateWarp() {
+    @Test fun modelOutputsRefineYawAndActivateWarp() {
         val f = CalibrationFusion()
         f.onSpeed(10f) // 36 km/h,超過校正速度門檻
-        // 合成 vision 輸出:pose x 平移可信、pitch/yaw std 小、height 合理
-        val vision = FloatArray(1600)
-        vision[87] = 5f          // poseTransX
-        vision[87 + 6] = -3f     // ln(std) → std=e^-3 小
-        vision[99] = 0f          // wideRoll
-        vision[99 + 1] = Math.toRadians(3.0).toFloat()  // widePitch 3°
-        vision[99 + 2] = 0f      // wideYaw
-        vision[99 + 4] = -3f     // pitchStd
-        vision[99 + 5] = -3f     // yawStd
-        vision[105 + 2] = 1.4f   // roadHeight
-        vision[105 + 8] = -3f    // heightStd
         var activated = false
-        repeat(25) { if (f.onModelOutputs(vision)) activated = true }
+        repeat(25) { if (f.onModelOutputs(plausibleVision())) activated = true }
         assertTrue(activated)          // 累積 20 樣本後 warp 啟用一次
         assertTrue(f.state().valid)
+    }
+
+    // pitch 永遠即時跟隨 IMU,不因校正 valid 而凍結或被模型覆蓋
+    @Test fun pitchAlwaysTracksImuEvenWhenValid() {
+        val f = CalibrationFusion()
+        var t = 0L
+        repeat(150) { t += 20; f.onImuTilt(Tilt(0f, -12f), t) }
+        f.forceCalibrate()
+        assertTrue(f.state().valid)
+        assertEquals(-12f, f.state().pitchDeg, 1f)
+        // 手機姿態緩慢改變(每步 <6° 不觸發重置)→ pitch 必須跟上
+        repeat(300) { t += 20; f.onImuTilt(Tilt(0f, -4f), t) }
+        assertEquals(-4f, f.state().pitchDeg, 1f)
+        assertTrue(f.state().valid)   // 校正狀態不受影響
     }
 }

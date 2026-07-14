@@ -64,10 +64,12 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
         imuRollDeg += (tilt.rollDeg - imuRollDeg) * alpha
         imuPitchDeg += (tilt.pitchDeg - imuPitchDeg) * alpha
         if (sudden && abs(tilt.rollDeg - imuRollDeg) > SUDDEN_CHANGE_DEG / 2) {
-            // 濾波後仍偏離 → 真突變(非單次雜訊):快速跟上並要求重置
+            // 真突變(手機被重新擺放):IMU 立即跟上新姿態,清掉舊 yaw 細化;
+            // 不取消 valid——pitch/roll 由 IMU 即時供給,不需要使用者重新校正
             imuRollDeg = tilt.rollDeg
             imuPitchDeg = tilt.pitchDeg
-            reset()
+            modelYawDeg = 0f
+            sampleCount = 0
             return true
         }
         return false
@@ -101,9 +103,9 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
 
         var updated = false
         if (eulerReliable) {
-            val obsPitch = Math.toDegrees(widePitch.toDouble()).toFloat()
+            // pitch/roll 一律以 IMU 為準(重力參考、即時、方向已實機驗證);
+            // 模型只細化 IMU 測不到的 yaw
             val obsYaw = Math.toDegrees(wideYaw.toDouble()).toFloat()
-            if (obsPitch in -12f..12f) { modelPitchDeg = lowPass(modelPitchDeg, obsPitch, 0.015f); updated = true }
             if (obsYaw in -12f..12f) { modelYawDeg = lowPass(modelYawDeg, obsYaw, 0.015f); updated = true }
         }
         if (roadHeight.isFinite() && roadHeightStd.isFinite() && roadHeightStd < 0.60f && roadHeight in 0.7f..2.2f) {
@@ -118,9 +120,9 @@ class CalibrationFusion(private val initialPitchDeg: Float = 5.5f) {
     }
 
     fun state(): CalibrationState {
-        // pitch:模型校正 valid 前採 IMU,valid 後採模型細化值
-        val pitch = if (valid) modelPitchDeg else imuPitchDeg
-        return CalibrationState(imuRollDeg, pitch, modelYawDeg, heightM, valid, sampleCount,
+        // pitch/roll 永遠即時取自 IMU——校正狀態只影響 yaw/height 細化與 UI 顯示。
+        // (曾經 valid 後切換到模型 pitch:凍結在按鈕當下的姿態,路線飛天。不再切換。)
+        return CalibrationState(imuRollDeg, imuPitchDeg, modelYawDeg, heightM, valid, sampleCount,
             speedMps, speedMps >= MIN_CALIB_SPEED_MPS)
     }
 
