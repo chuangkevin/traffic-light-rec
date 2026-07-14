@@ -81,8 +81,12 @@ class DrivingPipeline(
         val bigMatrix = sourceFromModelFrame(upright.width.toFloat(), upright.height.toFloat(),
             horizontalFovDeg, rollRad, pitchRad, yawRad, bigModelFrame = true)
 
-        val med = packYuv12(upright.warpToModelFrame(medMatrix, big = false))
+        // med/big 兩路 warp+pack 互相獨立,平行處理
+        val medTask = java.util.concurrent.CompletableFuture.supplyAsync {
+            packYuv12(upright.warpToModelFrame(medMatrix, big = false))
+        }
         val big = packYuv12(upright.warpToModelFrame(bigMatrix, big = true))
+        val med = medTask.get()
 
         val stackedMed = ByteArray(PACKED_FRAME_SIZE * 2)
         (previousMed ?: med).copyInto(stackedMed, 0)
